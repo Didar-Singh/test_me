@@ -1,5 +1,7 @@
+import csv
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 import time
 import tkinter as tk
@@ -51,6 +53,50 @@ def ask_mode() -> str:
     root.wait_window(win)
     root.destroy()
     return choice["value"]
+
+
+def ask_report_folder(default_dst: Path) -> Path:
+    """Ask where to save the report. Defaults to destination folder."""
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+
+    result = {"path": default_dst}
+
+    win = tk.Toplevel(root)
+    win.title("Report Output Folder")
+    win.attributes("-topmost", True)
+    win.resizable(False, False)
+    win.grab_set()
+
+    tk.Label(
+        win,
+        text="Where should the CSV report be saved?",
+        font=("Segoe UI", 10, "bold"),
+        pady=8,
+    ).pack()
+
+    tk.Label(win, text=f"Default: {default_dst}", fg="gray", wraplength=380).pack(padx=10)
+
+    def use_default():
+        result["path"] = default_dst
+        win.destroy()
+
+    def pick_custom():
+        folder = filedialog.askdirectory(title="Select Report Output Folder", parent=win)
+        if folder:
+            result["path"] = Path(folder)
+        win.destroy()
+
+    tk.Button(win, text="Save report to Destination folder (default)", width=38,
+              command=use_default).pack(pady=4)
+    tk.Button(win, text="Choose a different folder…", width=38,
+              command=pick_custom).pack(pady=4, padx=10)
+
+    win.protocol("WM_DELETE_WINDOW", use_default)
+    root.wait_window(win)
+    root.destroy()
+    return result["path"]
 
 
 def ask_recursive() -> bool:
@@ -118,13 +164,16 @@ def collect_files(src_dir: Path, recursive: bool) -> list[Path]:
     return [f for f in src_dir.iterdir() if f.is_file()]
 
 
-def copy_file(src_path: Path, dst_path: Path) -> tuple[str, bool, str]:
+def copy_file(src_path: Path, dst_path: Path) -> tuple[str, bool, str, float, int]:
+    """Returns (name, success, error, duration_s, size_bytes)."""
+    size = src_path.stat().st_size
+    t0 = time.perf_counter()
     try:
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_path, dst_path)
-        return src_path.name, True, ""
+        return src_path.name, True, "", time.perf_counter() - t0, size
     except Exception as e:
-        return src_path.name, False, str(e)
+        return src_path.name, False, str(e), time.perf_counter() - t0, size
 
 
 def list_files(files: list[Path], base_dir: Path | None = None):
@@ -145,7 +194,75 @@ def list_files(files: list[Path], base_dir: Path | None = None):
     print(f"  Total: {len(files)} file(s)\n")
 
 
-def run_copy(files: list[Path], dst_dir: Path, workers: int = 8, base_dir: Path | None = None):
+def _progress_bar(done: int, total: int, width: int = 30) -> str:
+    filled = int(width * done / total) if total else 0
+    bar = "█" * filled + "░" * (width - filled)
+    pct = 100 * done / total if total else 0
+    return f"[{bar}] {pct:5.1f}%"
+
+
+def _fmt_size(n: int) -> str:
+    if n >= 1_048_576:
+        return f"{n / 1_048_576:.2f} MB"
+    if n >= 1_024:
+        return f"{n / 1_024:.1f} KB"
+    return f"{n} B"
+
+
+def write_report(
+    report_dir: Path,
+    rows: list[dict],
+    total_elapsed: float,
+    dst_dir: Path,
+    src_dir: Path | None,
+) -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = report_dir / f"copy_report_{ts}.csv"
+
+    copied  = [r for r in rows if r["status"] == "OK"]
+    failed  = [r for r in rows if r["status"] == "FAILED"]
+    total_bytes = sum(r["size_bytes"] for r in copied)
+
+    with report_path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+
+        # ── Summary block ────────────────────────────────────────
+        w.writerow(["=== Copy Report ==="])
+        w.writerow(["Generated",    datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        if src_dir:
+            w.writerow(["Source",   str(src_dir)])
+        w.writerow(["Destination",  str(dst_dir)])
+        w.writerow(["Total files",  len(rows)])
+        w.writerow(["Copied",       len(copied)])
+        w.writerow(["Failed",       len(failed)])
+        w.writerow(["Total size",   _fmt_size(total_bytes)])
+        w.writerow(["Total time",   f"{total_elapsed:.2f}s"])
+        avg_speed = total_bytes / total_elapsed / 1_048_576 if total_elapsed > 0 else 0
+        w.writerow(["Avg speed",    f"{avg_speed:.2f} MB/s"])
+        w.writerow([])
+
+        # ── Per-file detail ──────────────────────────────────────
+        w.writerow(["#", "File Name", "Size", "Status", "Duration (s)", "Error"])
+        for i, r in enumerate(rows, 1):
+            w.writerow([
+                i,
+                r["name"],
+                _fmt_size(r["size_bytes"]),
+                r["status"],
+                f"{r['duration']:.3f}",
+                r["error"],
+            ])
+
+    return report_path
+
+
+def run_copy(
+    files: list[Path],
+    dst_dir: Path,
+    report_dir: Path,
+    workers: int = 8,
+    base_dir: Path | None = None,
+):
     dst_dir.mkdir(parents=True, exist_ok=True)
     list_files(files, base_dir)
 
@@ -154,29 +271,52 @@ def run_copy(files: list[Path], dst_dir: Path, workers: int = 8, base_dir: Path 
         print("Cancelled.")
         return
 
-    print(f"\nCopying {len(files)} file(s) with {workers} threads...\n")
+    total = len(files)
+    print(f"\nCopying {total} file(s) with {workers} threads...\n")
     start = time.perf_counter()
     done, failed = 0, 0
+    rows: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
                 copy_file, f,
                 dst_dir / f.relative_to(base_dir) if base_dir else dst_dir / f.name
-            ): f.name
+            ): f
             for f in files
         }
         for future in as_completed(futures):
-            name, success, err = future.result()
+            name, success, err, duration, size = future.result()
+            rows.append({"name": name, "status": "OK" if success else "FAILED",
+                         "error": err, "duration": duration, "size_bytes": size})
             if success:
                 done += 1
             else:
                 failed += 1
-                print(f"  FAILED: {name} — {err}")
-            print(f"  Progress: {done + failed}/{len(files)}", end="\r")
+
+            completed = done + failed
+            elapsed = time.perf_counter() - start
+            speed = completed / elapsed if elapsed > 0 else 0
+            remaining = (total - completed) / speed if speed > 0 else 0
+            eta = f"{remaining:.0f}s" if remaining < 60 else f"{remaining / 60:.1f}m"
+
+            bar = _progress_bar(completed, total)
+            status = f"  {bar}  {completed}/{total}  ✓{done}  ✗{failed}  {speed:.1f} f/s  ETA {eta}   "
+            print(status, end="\r", flush=True)
 
     elapsed = time.perf_counter() - start
-    print(f"\n\nDone.  {done} copied  |  {failed} failed  |  {elapsed:.2f}s")
+    print(" " * 90, end="\r")
+
+    failed_rows = [r for r in rows if r["status"] == "FAILED"]
+    if failed_rows:
+        print("  Failed files:")
+        for r in failed_rows:
+            print(f"    ✗  {r['name']} — {r['error']}")
+
+    print(f"\n  Done.  {done} copied  |  {failed} failed  |  {elapsed:.2f}s")
+
+    report_path = write_report(report_dir, rows, elapsed, dst_dir, base_dir)
+    print(f"  Report  : {report_path}\n")
 
 
 if __name__ == "__main__":
@@ -205,7 +345,9 @@ if __name__ == "__main__":
             print("No destination folder selected. Exiting.")
             exit()
         print(f"Destination : {dst}")
-        run_copy(files, dst, base_dir=src)
+        report_dir = ask_report_folder(dst)
+        print(f"Report to   : {report_dir}")
+        run_copy(files, dst, report_dir, base_dir=src)
 
     # ── PICK FILES VIA GUI ───────────────────────────────────────
     elif mode == "files":
@@ -219,7 +361,9 @@ if __name__ == "__main__":
             print("No destination folder selected. Exiting.")
             exit()
         print(f"Destination : {dst}")
-        run_copy(files, dst)
+        report_dir = ask_report_folder(dst)
+        print(f"Report to   : {report_dir}")
+        run_copy(files, dst, report_dir)
 
     # ── PASTE LIST FROM EXCEL ────────────────────────────────────
     elif mode == "excel":
@@ -255,6 +399,8 @@ if __name__ == "__main__":
 
         print(f"\nSource      : {src}")
         print(f"Destination : {dst}")
-        run_copy(found, dst)
+        report_dir = ask_report_folder(dst)
+        print(f"Report to   : {report_dir}")
+        run_copy(found, dst, report_dir)
 
     input("\nPress Enter to exit...")
