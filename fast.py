@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import winsound
 
 
 def pick_folder(title: str) -> Path | None:
@@ -45,6 +46,7 @@ def ask_mode() -> str:
         choice["value"] = m
         win.destroy()
 
+    tk.Button(win, text="Type Paths Manually",  width=25, command=lambda: set_mode("manual")).pack(pady=4)
     tk.Button(win, text="Entire Folder",        width=25, command=lambda: set_mode("folder")).pack(pady=4)
     tk.Button(win, text="Pick Files (GUI)",     width=25, command=lambda: set_mode("files")).pack(pady=4)
     tk.Button(win, text="Paste List from Excel",width=25, command=lambda: set_mode("excel")).pack(pady=4)
@@ -194,6 +196,15 @@ def list_files(files: list[Path], base_dir: Path | None = None):
     print(f"  Total: {len(files)} file(s)\n")
 
 
+def _notify(title: str, message: str) -> None:
+    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    messagebox.showinfo(title, message, parent=root)
+    root.destroy()
+
+
 def _progress_bar(done: int, total: int, width: int = 30) -> str:
     filled = int(width * done / total) if total else 0
     bar = "█" * filled + "░" * (width - filled)
@@ -318,6 +329,11 @@ def run_copy(
     report_path = write_report(report_dir, rows, elapsed, dst_dir, base_dir)
     print(f"  Report  : {report_path}\n")
 
+    _notify(
+        "Fast File Copy — Done",
+        f"{done} copied  |  {failed} failed  |  {elapsed:.2f}s\n\nReport: {report_path}",
+    )
+
 
 if __name__ == "__main__":
     print("=== Fast File Copy ===\n")
@@ -328,8 +344,42 @@ if __name__ == "__main__":
         print("No mode selected. Exiting.")
         exit()
 
+    # ── TYPE PATHS MANUALLY ──────────────────────────────────────
+    if mode == "manual":
+        while True:
+            src_input = input("Source folder path      : ").strip().strip('"')
+            src = Path(src_input)
+            if src.is_dir():
+                break
+            print(f"  ! Path not found: {src_input}")
+
+        recursive_input = input("Include subfolders? (y/n): ").strip().lower()
+        recursive = recursive_input == "y"
+
+        files = collect_files(src, recursive)
+        if not files:
+            print("No files found in the source folder. Exiting.")
+            input("\nPress Enter to exit...")
+            exit()
+
+        while True:
+            dst_input = input("Destination folder path : ").strip().strip('"')
+            dst = Path(dst_input)
+            if dst == src:
+                print("  ! Source and destination cannot be the same.")
+                continue
+            break
+
+        report_input = input(f"Report folder (Enter = destination): ").strip().strip('"')
+        report_dir = Path(report_input) if report_input else dst
+
+        print(f"\nSource      : {src}")
+        print(f"Destination : {dst}")
+        print(f"Report to   : {report_dir}")
+        run_copy(files, dst, report_dir, base_dir=src)
+
     # ── ENTIRE FOLDER ────────────────────────────────────────────
-    if mode == "folder":
+    elif mode == "folder":
         src = pick_folder("Select SOURCE folder")
         if not src:
             print("No source folder selected. Exiting.")
