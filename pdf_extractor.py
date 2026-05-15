@@ -46,7 +46,7 @@ def auto_fit_columns(ws, min_width=8, max_width=60):
 
 
 def write_table(ws, table_data, start_row):
-    """Write a 2-D list as a styled table; return the next free row."""
+    """Write a 2-D list as a styled table, one line per row; return the next free row."""
     if not table_data:
         return start_row
 
@@ -60,19 +60,31 @@ def write_table(ws, table_data, start_row):
                 else (TABLE_ROW_FILL_ODD if r_idx % 2 == 1 else TABLE_ROW_FILL_EVN))
         font = TABLE_HEADER_FONT if is_header else Font(size=10)
 
-        for c_idx, value in enumerate(row):
-            cell = ws.cell(row=start_row + r_idx, column=c_idx + 1,
-                           value=str(value).strip() if value else "")
-            cell.fill   = fill
-            cell.font   = font
-            cell.border = CELL_BORDER
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        # Split every cell by newline so each line lands in its own Excel row
+        cell_lines = []
+        for value in row:
+            raw = str(value).strip() if value else ""
+            lines = [l.strip() for l in raw.split("\n") if l.strip()]
+            cell_lines.append(lines or [""])
 
-    return start_row + len(rows) + 1          # +1 blank separator row
+        num_sub_rows = max(len(lines) for lines in cell_lines)
+
+        for sub in range(num_sub_rows):
+            for c_idx, lines in enumerate(cell_lines):
+                val  = lines[sub] if sub < len(lines) else ""
+                cell = ws.cell(row=start_row, column=c_idx + 1, value=val)
+                cell.fill      = fill
+                cell.font      = font
+                cell.border    = CELL_BORDER
+                cell.alignment = Alignment(wrap_text=False, vertical="top",
+                                           horizontal="left")
+            start_row += 1
+
+    return start_row + 1          # +1 blank separator row
 
 
 def write_text_block(ws, text, start_row):
-    """Write a text block; return the next free row."""
+    """Write a text block one line per row; return the next free row."""
     if not text or not text.strip():
         return start_row
 
@@ -83,7 +95,8 @@ def write_text_block(ws, text, start_row):
             continue
         cell = ws.cell(row=start_row, column=1, value=line)
         cell.font      = TEXT_FONT
-        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        cell.alignment = Alignment(wrap_text=False, vertical="top",
+                                   horizontal="left")
         start_row += 1
 
     return start_row + 1                       # blank separator row
@@ -114,9 +127,6 @@ def extract_pdf_to_excel(pdf_path: str, output_dir: str | None = None) -> str:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Extracted"
-
-    # Freeze the first row so headers stay visible while scrolling
-    ws.freeze_panes = "A2"
 
     current_row = 1
 
