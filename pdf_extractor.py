@@ -135,28 +135,40 @@ def extract_pdf_to_excel(pdf_path: str, output_dir: str | None = None) -> str:
             current_row = write_page_header(ws, page_num, current_row)
 
             # ── Collect tables on this page ──────────────────────────────────
-            tables = page.extract_tables()
+            found_tables = page.find_tables()
 
-            if tables:
-                # Get bounding boxes so we can skip text that overlaps tables
-                table_bboxes = [t.bbox for t in page.find_tables()]
-                has_bbox     = bool(table_bboxes)
+            if found_tables:
+                table_bboxes = [t.bbox for t in found_tables]
 
-                for table in tables:
-                    current_row = write_table(ws, table, current_row)
+                for t in found_tables:
+                    table_data = []
+                    for row in t.rows:
+                        row_cells = []
+                        for cell_bbox in row.cells:
+                            if cell_bbox is None:
+                                row_cells.append("")
+                                continue
+                            # Crop to cell and extract with layout so each
+                            # line inside the cell becomes a separate \n
+                            try:
+                                cell_text = (
+                                    page.crop(cell_bbox)
+                                        .extract_text(layout=True) or ""
+                                ).strip()
+                            except Exception:
+                                cell_text = ""
+                            row_cells.append(cell_text)
+                        table_data.append(row_cells)
+                    current_row = write_table(ws, table_data, current_row)
 
-                # Extract text outside table regions
-                if has_bbox:
-                    # Crop away table areas and get remaining text
-                    remaining = page
-                    for bbox in table_bboxes:
-                        try:
-                            remaining = remaining.outside_bbox(bbox)
-                        except Exception:
-                            pass
-                    text = remaining.extract_text() or ""
-                else:
-                    text = ""
+                # Extract only text that sits outside all table regions
+                remaining = page
+                for bbox in table_bboxes:
+                    try:
+                        remaining = remaining.outside_bbox(bbox)
+                    except Exception:
+                        pass
+                text = remaining.extract_text() or ""
 
             else:
                 text = page.extract_text() or ""
