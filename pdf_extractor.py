@@ -9,6 +9,7 @@ Requirements:
 
 import os
 import sys
+from collections import defaultdict
 import pdfplumber
 import openpyxl
 from openpyxl.styles import (
@@ -35,6 +36,33 @@ CELL_BORDER        = Border(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def cell_lines_from_bbox(page, bbox, y_tolerance=3):
+    """
+    Return a list of text lines found inside a cell bounding box.
+    Groups words by their vertical (top) position so each physical line
+    in the PDF becomes a separate list entry — even when names are
+    tightly spaced and extract_text() would join them with spaces.
+    """
+    try:
+        words = page.crop(bbox).extract_words(
+            x_tolerance=3, y_tolerance=y_tolerance
+        )
+    except Exception:
+        return [""]
+
+    if not words:
+        return [""]
+
+    # Group words into lines by rounding their top-coordinate
+    buckets = defaultdict(list)
+    for w in words:
+        key = round(w["top"] / y_tolerance) * y_tolerance
+        buckets[key].append(w["text"])
+
+    lines = [" ".join(ws) for _, ws in sorted(buckets.items())]
+    return lines if lines else [""]
+
+
 def auto_fit_columns(ws, min_width=8, max_width=60):
     for col in ws.columns:
         best = min_width
@@ -46,41 +74,40 @@ def auto_fit_columns(ws, min_width=8, max_width=60):
 
 
 def write_table(ws, table_data, start_row):
-    """Write a 2-D list as a styled table, one line per row; return the next free row."""
+    """
+    table_data: list of rows; each row is a list of cells;
+                each cell is already a list-of-lines (from cell_lines_from_bbox).
+    Each line gets its own Excel row. Returns the next free row.
+    """
     if not table_data:
         return start_row
 
-    # Normalise row lengths
     max_cols = max(len(r) for r in table_data)
-    rows = [r + [""] * (max_cols - len(r)) for r in table_data]
+    # Pad short rows so every row has the same number of columns
+    rows = [r + [[""]] * (max_cols - len(r)) for r in table_data]
 
     for r_idx, row in enumerate(rows):
-        is_header = r_idx == 0
-        fill = (TABLE_HEADER_FILL if is_header
-                else (TABLE_ROW_FILL_ODD if r_idx % 2 == 1 else TABLE_ROW_FILL_EVN))
-        font = TABLE_HEADER_FONT if is_header else Font(size=10)
+        is_header  = r_idx == 0
+        base_fill  = (TABLE_HEADER_FILL if is_header
+                      else (TABLE_ROW_FILL_ODD if r_idx % 2 == 1
+                            else TABLE_ROW_FILL_EVN))
+        font       = TABLE_HEADER_FONT if is_header else Font(size=10)
 
-        # Split every cell by newline so each line lands in its own Excel row
-        cell_lines = []
-        for value in row:
-            raw = str(value).strip() if value else ""
-            lines = [l.strip() for l in raw.split("\n") if l.strip()]
-            cell_lines.append(lines or [""])
-
-        num_sub_rows = max(len(lines) for lines in cell_lines)
+        # Each cell is already a list-of-lines; find the tallest cell
+        num_sub_rows = max(len(cell) for cell in row)
 
         for sub in range(num_sub_rows):
-            for c_idx, lines in enumerate(cell_lines):
+            for c_idx, lines in enumerate(row):
                 val  = lines[sub] if sub < len(lines) else ""
                 cell = ws.cell(row=start_row, column=c_idx + 1, value=val)
-                cell.fill      = fill
+                cell.fill      = base_fill
                 cell.font      = font
                 cell.border    = CELL_BORDER
                 cell.alignment = Alignment(wrap_text=False, vertical="top",
                                            horizontal="left")
             start_row += 1
 
-    return start_row + 1          # +1 blank separator row
+    return start_row + 1          # blank separator row
 
 
 def write_text_block(ws, text, start_row):
@@ -146,18 +173,13 @@ def extract_pdf_to_excel(pdf_path: str, output_dir: str | None = None) -> str:
                         row_cells = []
                         for cell_bbox in row.cells:
                             if cell_bbox is None:
-                                row_cells.append("")
+                                row_cells.append([""])
                                 continue
-                            # Crop to cell and extract with layout so each
-                            # line inside the cell becomes a separate \n
-                            try:
-                                cell_text = (
-                                    page.crop(cell_bbox)
-                                        .extract_text(layout=True) or ""
-                                ).strip()
-                            except Exception:
-                                cell_text = ""
-                            row_cells.append(cell_text)
+                            # Use word-based grouping so each physical line
+                            # in the cell (e.g. each employee name) becomes
+                            # its own list entry → its own Excel row
+                            lines = cell_lines_from_bbox(page, cell_bbox)
+                            row_cells.append(lines)
                         table_data.append(row_cells)
                     current_row = write_table(ws, table_data, current_row)
 
