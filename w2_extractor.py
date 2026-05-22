@@ -322,16 +322,33 @@ def extract_w2(file_path: str) -> pd.DataFrame:
 # Batch helper
 # ---------------------------------------------------------------------------
 
-def extract_w2_batch(input_dir: str, output_csv: str) -> None:
+def _save_parts(df: pd.DataFrame, output_csv: str, part_size: int = 1000) -> None:
+    """Split *df* into chunks of *part_size* rows and write one CSV per chunk."""
+    out = Path(output_csv)
+    stem = out.stem
+    suffix = out.suffix
+    total = len(df)
+    num_parts = (total + part_size - 1) // part_size
+
+    for part_num in range(1, num_parts + 1):
+        chunk = df.iloc[(part_num - 1) * part_size : part_num * part_size]
+        part_path = out.parent / f"{stem}_Part{part_num}{suffix}"
+        chunk.to_csv(part_path, index=False)
+        print(f"  Part {part_num}/{num_parts}: {len(chunk)} records -> {part_path.name}")
+
+
+def extract_w2_batch(input_dir: str, output_csv: str, part_size: int = 1000) -> None:
     """
-    Process every PDF in *input_dir* and write combined results to *output_csv*.
+    Process every PDF in *input_dir* and write results split into part files.
 
     Parameters
     ----------
     input_dir : str
         Directory containing W-2 PDF files.
     output_csv : str
-        Destination CSV path (will be created/overwritten).
+        Base output path; parts are saved as <stem>_Part1.csv, _Part2.csv, etc.
+    part_size : int
+        Number of records per output file (default 1000).
     """
     pdf_files = list(Path(input_dir).glob("*.pdf"))
     if not pdf_files:
@@ -349,8 +366,8 @@ def extract_w2_batch(input_dir: str, output_csv: str) -> None:
 
     if frames:
         combined = pd.concat(frames, ignore_index=True)
-        combined.to_csv(output_csv, index=False)
-        print(f"\nExtracted {len(combined)} record(s) -> {output_csv}")
+        print(f"\nExtracted {len(combined)} record(s) total")
+        _save_parts(combined, output_csv, part_size)
     else:
         print("No records extracted.")
 
@@ -396,6 +413,6 @@ if __name__ == "__main__":
         extract_w2_batch(target, out_csv)
     else:
         result = extract_w2(target)
-        result.to_csv(out_csv, index=False)
         print(result.to_string(index=False))
-        print(f"\nSaved -> {out_csv}")
+        print(f"\nExtracted {len(result)} record(s) total")
+        _save_parts(result, out_csv)
