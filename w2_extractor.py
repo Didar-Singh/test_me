@@ -1,7 +1,8 @@
 # w2_extractor.py
 # Extracts Employee Name, SSN, and Address from all pages of
-# W-2 and Earnings Summary PDF files (2013–2016 formats, searchable PDFs).
-# Returns one row per page. If extraction is wrong, run with --debug first.
+# W-2 PDF files (ADP layout and standard IRS layouts).
+# Uses coordinate-based word extraction for accurate field detection.
+# Returns one row per employee per page. If extraction is wrong, run with --debug first.
 #
 # Outputs results to a CSV file.
 #
@@ -12,7 +13,7 @@
 # USAGE
 # ---------------------------------------------------------------------------
 #
-# Debug mode — print raw lines pdfplumber reads from the first page.
+# Debug mode — print raw word positions pdfplumber reads from the first page.
 # Run this first on a new PDF to verify label detection before extracting.
 #
 #   python pythonScripts/w2_extractor.py "C:\YourFolder\sample_w2.pdf" --debug
@@ -45,20 +46,144 @@ from tqdm import tqdm
 # Regex patterns
 # ---------------------------------------------------------------------------
 
-# SSN: 123-45-6789 or 123 45 6789 (with optional spaces around separators)
-_SSN_RE = re.compile(r"\b(\d{3}[-\s]\d{2}[-\s]\d{4})\b")
+# SSN: XXX-XX-XXXX (not EIN format XX-XXXXXXX)
+_SSN_PATTERN = re.compile(r"^\d{3}-\d{2}-\d{4}$")
+_SSN_IN_LINE = re.compile(r"\b(\d{3}-\d{2}-\d{4})\b")
 
-# Multi-word name: Title Case ("John Doe") or ALL-CAPS ("JOHN DOE"), 2–5 tokens
-_NAME_RE = re.compile(r"\b([A-Z][a-zA-Z\-']+(?:\s+[A-Z][a-zA-Z\-']*){1,4})\b")
+# City, ST ZIP pattern
+_CITY_STATE_ZIP_RE = re.compile(r"^.+,?\s+[A-Z]{2}\s+\d{5}(?:-\d{4})?\s*$")
 
-# US ZIP / ZIP+4 anchors an address line
+# US ZIP / ZIP+4
 _ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 
 
 # ---------------------------------------------------------------------------
-# Words that disqualify a text token from being an employee name.
-# These are W-2 form labels, financial terms, and document header words.
+# Layout constants (tuned for ADP W-2 layout)
+# The 'e/f' block label sits at top < 280 and x0 < 60
 # ---------------------------------------------------------------------------
+
+_EF_LABEL_MAX_Y = 280
+_EF_LABEL_MAX_X = 60
+_SSN_OFFSET_MIN = 30   # points below e/f label where SSN appears
+_SSN_OFFSET_MAX = 80
+_BOTTOM_ROW_Y_MIN = 450  # SSNs below this are employer copies — ignore
+
+
+# ---------------------------------------------------------------------------
+# Coordinate-based extraction (primary path — matches extract_w2_gui.py logic)
+# ---------------------------------------------------------------------------
+
+def _find_ef_blocks(words: list) -> list:
+    """Return position dicts for each 'e/f' label found in the top region of the page."""
+    blocks = []
+    for w in words:
+        if w["top"] > _EF_LABEL_MAX_Y:
+            continue
+        if w["x0"] > _EF_LABEL_MAX_X:
+            continue
+        text_lower = w["text"].lower()
+        if text_lower == "e/f" or text_lower.startswith("e/f"):
+            blocks.append({"top": w["top"], "x0": w["x0"]})
+    return blocks
+
+
+def _extract_employee_from_block(words: list, label_top: float, label_x0: float) -> dict | None:
+    """
+    Given the position of an 'e/f' label, extract name/street/city-state-zip
+    from the 3 lines below it, and the SSN from the area further below.
+    """
+    # Words in the ~35pt window below the label, within the left column
+    block_words = [
+        w for w in words
+        if label_top + 2 < w["top"] < label_top + 35
+        and w["x0"] < 200
+        and w["x0"] > label_x0 - 5
+    ]
+    block_words.sort(key=lambda w: (w["top"], w["x0"]))
+
+    # Group into visual lines by proximity of 'top' coordinate
+    lines = []
+    LINE_TOL = 4
+    for w in block_words:
+        if not lines:
+            lines.append([w])
+            continue
+        if abs(w["top"] - lines[-1][0]["top"]) <= LINE_TOL:
+            lines[-1].append(w)
+        else:
+            lines.append([w])
+
+    text_lines = []
+    for line in lines:
+        line.sort(key=lambda w: w["x0"])
+        text = " ".join(w["text"] for w in line).strip()
+        if text and len(text) > 1:
+            text_lines.append(text)
+
+    if len(text_lines) < 2:
+        return None
+
+    # Find SSN in the y-offset band below the block label
+    ssn_candidates = []
+    for w in words:
+        if label_top + _SSN_OFFSET_MIN < w["top"] < label_top + _SSN_OFFSET_MAX:
+            if w["x0"] < 200:
+                m = _SSN_IN_LINE.search(w["text"])
+                if m and _SSN_PATTERN.match(m.group(1)):
+                    ssn_candidates.append(m.group(1))
+
+    # Fallback: search full text of that region (handles fused tokens)
+    if not ssn_candidates:
+        region_words = [
+            w for w in words
+            if label_top + _SSN_OFFSET_MIN < w["top"] < label_top + _SSN_OFFSET_MAX
+            and w["x0"] < 250
+        ]
+        line_text = " ".join(w["text"] for w in sorted(region_words, key=lambda w: w["x0"]))
+        for m in _SSN_IN_LINE.finditer(line_text):
+            if _SSN_PATTERN.match(m.group(1)):
+                ssn_candidates.append(m.group(1))
+
+    ssn = ssn_candidates[0] if ssn_candidates else ""
+
+    # Identify city/state/zip line, work backward for name and street
+    name = street = csz = ""
+    csz_idx = -1
+    for i, ln in enumerate(text_lines):
+        if _CITY_STATE_ZIP_RE.match(ln):
+            csz_idx = i
+            csz = ln
+            break
+
+    if csz_idx == -1:
+        # Positional fallback when no city/state/zip pattern matched
+        if len(text_lines) >= 1:
+            name = text_lines[0]
+        if len(text_lines) >= 2:
+            street = text_lines[1]
+        if len(text_lines) >= 3:
+            csz = text_lines[2]
+    elif csz_idx == 1:
+        name = text_lines[0]
+    elif csz_idx >= 2:
+        name = text_lines[0]
+        street = " ".join(text_lines[1:csz_idx]).strip()
+
+    return {
+        "name": name.strip(),
+        "street": street.strip(),
+        "city_state_zip": csz.strip(),
+        "ssn": ssn,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Text-based fallback (for PDFs where coordinate extraction finds nothing)
+# ---------------------------------------------------------------------------
+
+_SSN_RE_LOOSE = re.compile(r"\b(\d{3}[-\s]\d{2}[-\s]\d{4})\b")
+_ZIP_RE_TEXT = re.compile(r"\b\d{5}(?:-\d{4})?\b")
+_NAME_RE = re.compile(r"\b([A-Z][a-zA-Z\-']+(?:\s+[A-Z][a-zA-Z\-']*){1,4})\b")
 
 _NON_NAME_WORDS = {
     "EARNINGS", "SUMMARY", "WAGES", "TIPS", "COMPENSATION", "FEDERAL", "STATE",
@@ -70,21 +195,7 @@ _NON_NAME_WORDS = {
     "STATEMENT", "FORM", "WAGE", "AND", "TAX",
 }
 
-
-# ---------------------------------------------------------------------------
-# Label-based field anchors found on IRS W-2 / earnings summary layouts
-# ---------------------------------------------------------------------------
-
-_SSN_LABELS = [
-    "employee's social security number",
-    "social security number",
-    "ssn",
-    "social security no",
-]
-
-# The IRS "e/f" box label combines name + address on one label line.
-# The three data lines that follow are: Name, Street, City/State/ZIP.
-_EF_LABELS = [
+_EF_LABELS_TEXT = [
     "e/f employee's name, address, and zip code",
     "e/f employee's name, address, zip code",
     "employee's name, address, and zip code",
@@ -92,198 +203,121 @@ _EF_LABELS = [
     "employee's name, address",
 ]
 
-_NAME_LABELS = [
-    "employee's first name and initials",
-    "employee name",
-    "employee's name",
-    "first name",
+_SSN_LABELS_TEXT = [
+    "employee's social security number",
+    "social security number",
+    "ssn",
+    "social security no",
 ]
-
-_ADDR_LABELS = [
-    "employee's address and zip code",
-    "employee address",
-    "city, state, zip",
-]
-
-
-def _normalise(text: str) -> str:
-    return text.lower().strip()
-
-
-def _find_field(lines: list[str], labels: list[str]) -> str:
-    """
-    Find a field value by label — checks same line first, then next line.
-
-    Same-line case (common in W-2 multi-column layouts):
-        "a Employee's social security number  123-45-6789"
-
-    Next-line case:
-        "e/f Employee's Name, Address, and ZIP Code"
-        "ALBERTO RAJ ANTONY"
-    """
-    for i, line in enumerate(lines):
-        norm = _normalise(line)
-        for lbl in labels:
-            if lbl in norm:
-                # Value after the label on the same line
-                idx = norm.index(lbl)
-                remainder = line[idx + len(lbl):].strip().lstrip(":- ").strip()
-                if remainder:
-                    return remainder
-                # Value on the next non-blank line
-                for candidate in lines[i + 1:]:
-                    if candidate.strip():
-                        return candidate.strip()
-    return ""
-
-
-def _find_ef_block(lines: list[str]) -> tuple[str, str, str]:
-    """
-    Locate the e/f combined label and extract name, street, city/state/ZIP.
-
-    Instead of fixed index offsets, we anchor on the ZIP code line so that
-    any extra lines pdfplumber inserts between fields don't shift the result.
-
-    W-2 box e/f layout:
-        e/f Employee's Name, Address, and ZIP Code   <- label
-        ALBERTO RAJ ANTONY                           <- name  (line after label)
-        519 TRADITION PKWY 4200                      <- street (line before ZIP)
-        PLEASANTON CA 94566-4477                     <- city/state/zip (ZIP anchor)
-    """
-    for i, line in enumerate(lines):
-        norm = _normalise(line)
-        if any(lbl in norm for lbl in _EF_LABELS):
-            subsequent = [ln.strip() for ln in lines[i + 1:] if ln.strip()]
-
-            # First subsequent non-blank line = employee name
-            name = subsequent[0] if subsequent else ""
-            if not name or _is_form_label(name):
-                return "", "", ""
-
-            # Scan forward from after the name for the first line with a ZIP
-            street = ""
-            city_st_zip = ""
-            for j in range(1, len(subsequent)):
-                if _ZIP_RE.search(subsequent[j]):
-                    city_st_zip = subsequent[j]
-                    # The line immediately before the ZIP line is the street
-                    if j >= 2 and not _is_form_label(subsequent[j - 1]):
-                        street = subsequent[j - 1]
-                    elif j == 1:
-                        # Name and city/state/zip are adjacent — no street line
-                        street = ""
-                    break
-
-            return name, street, city_st_zip
-    return "", "", ""
-
-
-def _extract_ssn(text: str) -> str:
-    """Return the first SSN-shaped token found in *text*."""
-    match = _SSN_RE.search(text)
-    return match.group(1) if match else ""
 
 
 def _is_form_label(text: str) -> bool:
-    """Return True if any word in *text* is a known W-2 form/financial term."""
     return bool({w.upper() for w in text.split()} & _NON_NAME_WORDS)
 
 
-def _extract_name_from_block(block: str) -> str:
-    """Return the longest multi-word name candidate from *block*, excluding form labels."""
+def _extract_name_from_text(block: str) -> str:
     candidates = [c for c in _NAME_RE.findall(block) if not _is_form_label(c)]
     if not candidates:
         return ""
     return max(candidates, key=lambda s: len(s.split()))
 
 
-def _extract_address_near(lines: list[str], anchor_name: str) -> str:
-    """
-    Find the employee address by looking for a ZIP code in lines near where
-    the employee name appears. Avoids picking up the employer's address which
-    appears earlier on the page.
-    """
-    # Find the line index where the employee name appears
-    name_idx = -1
-    if anchor_name:
-        for i, line in enumerate(lines):
-            if anchor_name.split()[0] in line:  # match on first word of name
-                name_idx = i
-                break
-
-    # If we found the name, search for ZIP in the lines after it
-    search_lines = lines[name_idx:] if name_idx >= 0 else lines
-    for i, line in enumerate(search_lines):
-        if _ZIP_RE.search(line):
-            street = search_lines[i - 1].strip() if i > 0 else ""
-            city_state_zip = line.strip()
-            # Reject if the street line looks like a form label
-            if street and _is_form_label(street):
-                street = ""
-            parts = [p for p in [street, city_state_zip] if p]
-            return ", ".join(parts)
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# Core extraction
-# ---------------------------------------------------------------------------
-
-def _extract_page(page_text: str) -> dict:
-    """Extract name, SSN, and address fields from a single page's raw text."""
+def _text_fallback(page_text: str) -> dict:
+    """Text-based extraction used when coordinate method yields no results."""
     lines = [ln for ln in page_text.splitlines() if ln.strip()]
 
-    # --- SSN ---------------------------------------------------------------
-    # Check same line as label AND next line, then fall back to full-page scan
-    ssn_raw = _find_field(lines, _SSN_LABELS)
-    ssn = _extract_ssn(ssn_raw) if ssn_raw else _extract_ssn(page_text)
+    # SSN
+    ssn = ""
+    for line in lines:
+        norm = line.lower().strip()
+        for lbl in _SSN_LABELS_TEXT:
+            if lbl in norm:
+                idx = norm.index(lbl)
+                remainder = line[idx + len(lbl):].strip().lstrip(":- ").strip()
+                m = _SSN_RE_LOOSE.search(remainder or page_text)
+                if m:
+                    ssn = m.group(1)
+                break
+    if not ssn:
+        m = _SSN_RE_LOOSE.search(page_text)
+        ssn = m.group(1) if m else ""
 
-    # --- Name + Address (e/f combined box — primary path) ------------------
-    ef_name, ef_street, ef_city = _find_ef_block(lines)
+    # Name + address via e/f label
+    name = street = csz = ""
+    for i, line in enumerate(lines):
+        norm = line.lower().strip()
+        if any(lbl in norm for lbl in _EF_LABELS_TEXT):
+            subsequent = [ln.strip() for ln in lines[i + 1:] if ln.strip()]
+            if subsequent and not _is_form_label(subsequent[0]):
+                name = subsequent[0]
+                for j in range(1, len(subsequent)):
+                    if _ZIP_RE_TEXT.search(subsequent[j]):
+                        csz = subsequent[j]
+                        if j >= 2 and not _is_form_label(subsequent[j - 1]):
+                            street = subsequent[j - 1]
+                        break
+            break
 
-    if ef_name:
-        name = ef_name
-        parts = [p for p in [ef_street, ef_city] if p]
-        address = ", ".join(parts)
-        # If ef_block found name but missed address, try the smarter fallback
-        if not address:
-            address = _extract_address_near(lines, name)
-    else:
-        # Fallback: separate label lookups
-        name_raw = _find_field(lines, _NAME_LABELS)
-        name = _extract_name_from_block(name_raw) if name_raw else ""
-
-        if not name:
-            # Search within 5 lines of the SSN — name is always near SSN on W-2
-            for i, line in enumerate(lines):
-                if _SSN_RE.search(line):
-                    window = lines[max(0, i - 5): i + 5]
-                    for candidate_line in window:
-                        name = _extract_name_from_block(candidate_line)
-                        if name:
-                            break
-                if name:
-                    break
-
-        # Address: check "f" box label (same line or next), then near-name scan
-        addr_raw = _find_field(lines, _ADDR_LABELS)
-        if addr_raw and _ZIP_RE.search(addr_raw):
-            address = addr_raw
-        else:
-            address = _extract_address_near(lines, name)
-
-    return {"EmployeeName": name, "SSN": ssn, "Address": address}
+    return {"EmployeeName": name, "SSN": ssn, "Address": ", ".join(p for p in [street, csz] if p)}
 
 
-def extract_w2(file_path: str) -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# Core page extraction — coordinate-based primary, text fallback
+# ---------------------------------------------------------------------------
+
+def _extract_page_words(words: list, page_text: str) -> list[dict]:
     """
-    Extract Employee Name, SSN, and Address from all pages of a
-    W-2 or Earnings Summary PDF. Returns one row per page that yields data.
+    Extract all employee records from a page.
+    Returns a list of dicts (one per employee found).
+    Uses coordinate-based extraction; falls back to text if nothing found.
+    """
+    blocks = _find_ef_blocks(words)
+    records = []
+    seen_ssns: set = set()
+    seen_keys: set = set()
+
+    for block in blocks:
+        result = _extract_employee_from_block(words, block["top"], block["x0"])
+        if not result:
+            continue
+        if result["ssn"] and result["ssn"] in seen_ssns:
+            continue
+        key = (result["name"], result["street"], result["city_state_zip"])
+        if key == ("", "", ""):
+            continue
+        if not result["ssn"] and key in seen_keys:
+            continue
+        if result["ssn"]:
+            seen_ssns.add(result["ssn"])
+        seen_keys.add(key)
+
+        address_parts = [p for p in [result["street"], result["city_state_zip"]] if p]
+        records.append({
+            "EmployeeName": result["name"],
+            "SSN": result["ssn"],
+            "Address": ", ".join(address_parts),
+        })
+
+    # If coordinate extraction found nothing, use text fallback
+    if not records and page_text.strip():
+        fb = _text_fallback(page_text)
+        if fb["EmployeeName"] or fb["SSN"]:
+            records.append(fb)
+
+    return records
+
+
+def extract_w2(file_path: str, max_pages: int = 0) -> pd.DataFrame:
+    """
+    Extract Employee Name, SSN, and Address from a W-2 or Earnings Summary PDF.
+    Returns one row per employee per page.
 
     Parameters
     ----------
     file_path : str
         Path to the PDF file.
+    max_pages : int
+        Maximum number of pages to process. 0 (default) means all pages.
 
     Returns
     -------
@@ -301,20 +335,30 @@ def extract_w2(file_path: str) -> pd.DataFrame:
             raise ValueError(f"PDF has no pages: {file_path}")
 
         total = len(pdf.pages)
-        print(f"  {total} page(s) found. Extracting...", flush=True)
+        limit = min(total, max_pages) if max_pages > 0 else total
+        pages_to_process = pdf.pages[:limit]
+
+        if max_pages > 0 and max_pages < total:
+            print(f"  {total} page(s) found. Processing first {limit} page(s)...", flush=True)
+        else:
+            print(f"  {total} page(s) found. Extracting...", flush=True)
 
         for page_num, page in enumerate(
-            tqdm(pdf.pages, desc=f"  {path.name}", unit="pg", leave=True,
+            tqdm(pages_to_process, desc=f"  {path.name}", unit="pg", leave=True,
                  dynamic_ncols=True, miniters=1),
             start=1,
         ):
-            raw_text = page.extract_text() or ""
-            if not raw_text.strip():
-                continue
-            record = _extract_page(raw_text)
-            record["File"] = path.name
-            record["Page"] = page_num
-            rows.append(record)
+            try:
+                words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+            except Exception:
+                words = []
+            page_text = page.extract_text() or ""
+
+            records = _extract_page_words(words, page_text)
+            for record in records:
+                record["File"] = path.name
+                record["Page"] = page_num
+                rows.append(record)
 
     if not rows:
         return pd.DataFrame(columns=["File", "Page", "EmployeeName", "SSN", "Address"])
@@ -342,7 +386,8 @@ def _save_parts(df: pd.DataFrame, output_csv: str, part_size: int = 1000) -> Non
         print(f"  Part {part_num}/{num_parts}: {len(chunk)} records -> {part_path.name}")
 
 
-def extract_w2_batch(input_dir: str, output_csv: str, part_size: int = 1000) -> None:
+def extract_w2_batch(input_dir: str, output_csv: str, part_size: int = 1000,
+                     max_pages: int = 0) -> None:
     """
     Process every PDF in *input_dir* and write results split into part files.
 
@@ -354,6 +399,8 @@ def extract_w2_batch(input_dir: str, output_csv: str, part_size: int = 1000) -> 
         Base output path; parts are saved as <stem>_Part1.csv, _Part2.csv, etc.
     part_size : int
         Number of records per output file (default 1000).
+    max_pages : int
+        Maximum pages to process per PDF. 0 (default) means all pages.
     """
     pdf_files = list(Path(input_dir).glob("*.pdf"))
     if not pdf_files:
@@ -364,7 +411,7 @@ def extract_w2_batch(input_dir: str, output_csv: str, part_size: int = 1000) -> 
     for idx, pdf_path in enumerate(sorted(pdf_files), start=1):
         print(f"\n[{idx}/{len(pdf_files)}] {pdf_path.name}", flush=True)
         try:
-            df = extract_w2(str(pdf_path))
+            df = extract_w2(str(pdf_path), max_pages=max_pages)
             frames.append(df)
             print(f"  [OK]  {len(df)} records", flush=True)
         except Exception as exc:
@@ -384,41 +431,61 @@ def extract_w2_batch(input_dir: str, output_csv: str, part_size: int = 1000) -> 
 
 def _debug_lines(file_path: str) -> None:
     """
-    Print the raw lines pdfplumber extracts from the first page.
-    Use this to diagnose label-matching issues on a new PDF layout.
+    Print word positions pdfplumber extracts from the first page.
+    Use this to verify e/f label coordinates and tune layout constants.
     """
     with pdfplumber.open(file_path) as pdf:
-        raw = pdf.pages[0].extract_text() or ""
-    lines = [ln for ln in raw.splitlines() if ln.strip()]
-    print(f"\n--- Raw lines extracted from first page ({len(lines)} lines) ---")
-    for i, ln in enumerate(lines):
-        print(f"  [{i:03d}] {ln}")
+        words = pdf.pages[0].extract_words(use_text_flow=False, keep_blank_chars=False)
+    print(f"\n--- Word positions from first page ({len(words)} words) ---")
+    print(f"  {'x0':>6}  {'top':>6}  text")
+    print(f"  {'-'*6}  {'-'*6}  ----")
+    for w in words[:120]:  # cap at 120 to avoid flooding the terminal
+        print(f"  {w['x0']:>6.1f}  {w['top']:>6.1f}  {w['text']}")
+    if len(words) > 120:
+        print(f"  ... ({len(words) - 120} more words)")
     print("---")
 
 
 if __name__ == "__main__":
     # Usage:
-    #   python pythonScripts/w2_extractor.py <pdf_or_directory> [output.csv]
-    #   python pythonScripts/w2_extractor.py <pdf_file> --debug   (print raw lines only)
+    #   python w2_extractor.py <pdf_or_directory> [output.csv] [--pages N] [--debug]
+    #
+    # Examples:
+    #   python w2_extractor.py sample.pdf                        # all pages
+    #   python w2_extractor.py sample.pdf --pages 10             # first 10 pages only
+    #   python w2_extractor.py sample.pdf results.csv --pages 5
+    #   python w2_extractor.py "C:\PDFs\" results.csv --pages 20 # batch, 20 pages per file
+    #   python w2_extractor.py sample.pdf --debug                # show word positions
     #
     # DO NOT pass real W-2 files containing live PII — use anonymised samples only.
 
-    if len(sys.argv) < 2:
-        print("Usage: python w2_extractor.py <pdf_file_or_dir> [output.csv|--debug]")
-        sys.exit(1)
+    import argparse
 
-    target = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        prog="w2_extractor",
+        description="Extract Employee Name, SSN, and Address from W-2 PDFs.",
+    )
+    parser.add_argument("target", help="PDF file or folder of PDFs to process")
+    parser.add_argument("output", nargs="?", default="w2_extracted.csv",
+                        help="Output CSV path (default: w2_extracted.csv)")
+    parser.add_argument("--pages", type=int, default=0, metavar="N",
+                        help="Only process the first N pages per file (default: all pages)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print word positions from first page and exit")
+    args = parser.parse_args()
 
-    if len(sys.argv) > 2 and sys.argv[2] == "--debug":
-        _debug_lines(target)
+    if args.debug:
+        _debug_lines(args.target)
         sys.exit(0)
 
-    out_csv = sys.argv[2] if len(sys.argv) > 2 else "w2_extracted.csv"
+    if args.pages < 0:
+        print("Error: --pages must be a positive integer.")
+        sys.exit(1)
 
-    if os.path.isdir(target):
-        extract_w2_batch(target, out_csv)
+    if os.path.isdir(args.target):
+        extract_w2_batch(args.target, args.output, max_pages=args.pages)
     else:
-        result = extract_w2(target)
+        result = extract_w2(args.target, max_pages=args.pages)
         print(result.to_string(index=False))
         print(f"\nExtracted {len(result)} record(s) total")
-        _save_parts(result, out_csv)
+        _save_parts(result, args.output)
