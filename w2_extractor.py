@@ -1,12 +1,12 @@
 # w2_extractor.py
-# Extracts Employee Name, SSN, and Address from up to the first 5 pages of
+# Extracts Employee Name, SSN, and Address from all pages of
 # W-2 and Earnings Summary PDF files (2013–2016 formats, searchable PDFs).
 # Returns one row per page. If extraction is wrong, run with --debug first.
 #
 # Outputs results to a CSV file.
 #
-# Requires: pdfplumber, pandas
-#   pip install pdfplumber pandas
+# Requires: pdfplumber, pandas, tqdm
+#   pip install pdfplumber pandas tqdm
 #
 # ---------------------------------------------------------------------------
 # USAGE
@@ -38,6 +38,7 @@ from pathlib import Path
 
 import pdfplumber
 import pandas as pd
+from tqdm import tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -274,17 +275,15 @@ def _extract_page(page_text: str) -> dict:
     return {"EmployeeName": name, "SSN": ssn, "Address": address}
 
 
-def extract_w2(file_path: str, max_pages: int = 5) -> pd.DataFrame:
+def extract_w2(file_path: str) -> pd.DataFrame:
     """
-    Extract Employee Name, SSN, and Address from up to *max_pages* pages of a
+    Extract Employee Name, SSN, and Address from all pages of a
     W-2 or Earnings Summary PDF. Returns one row per page that yields data.
 
     Parameters
     ----------
     file_path : str
         Path to the PDF file.
-    max_pages : int
-        Maximum number of pages to process (default 5).
 
     Returns
     -------
@@ -300,8 +299,10 @@ def extract_w2(file_path: str, max_pages: int = 5) -> pd.DataFrame:
         if not pdf.pages:
             raise ValueError(f"PDF has no pages: {file_path}")
 
-        pages_to_read = pdf.pages[:max_pages]
-        for page_num, page in enumerate(pages_to_read, start=1):
+        for page_num, page in enumerate(
+            tqdm(pdf.pages, desc=f"  {path.name}", unit="pg", leave=False),
+            start=1,
+        ):
             raw_text = page.extract_text() or ""
             if not raw_text.strip():
                 continue
@@ -338,18 +339,18 @@ def extract_w2_batch(input_dir: str, output_csv: str) -> None:
         return
 
     frames = []
-    for pdf_path in sorted(pdf_files):
+    for pdf_path in tqdm(sorted(pdf_files), desc="Processing PDFs", unit="file"):
         try:
             df = extract_w2(str(pdf_path))
             frames.append(df)
-            print(f"  [OK]  {pdf_path.name}")
+            tqdm.write(f"  [OK]  {pdf_path.name}")
         except Exception as exc:
-            print(f"  [ERR] {pdf_path.name}: {exc}")
+            tqdm.write(f"  [ERR] {pdf_path.name}: {exc}")
 
     if frames:
         combined = pd.concat(frames, ignore_index=True)
         combined.to_csv(output_csv, index=False)
-        print(f"\nExtracted {len(combined)} record(s) → {output_csv}")
+        print(f"\nExtracted {len(combined)} record(s) -> {output_csv}")
     else:
         print("No records extracted.")
 
@@ -397,4 +398,4 @@ if __name__ == "__main__":
         result = extract_w2(target)
         result.to_csv(out_csv, index=False)
         print(result.to_string(index=False))
-        print(f"\nSaved → {out_csv}")
+        print(f"\nSaved -> {out_csv}")
