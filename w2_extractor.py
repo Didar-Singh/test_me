@@ -294,13 +294,18 @@ def extract_w2(file_path: str) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {file_path}")
 
+    print(f"Opening {path.name} ...", flush=True)
     rows = []
     with pdfplumber.open(str(path)) as pdf:
         if not pdf.pages:
             raise ValueError(f"PDF has no pages: {file_path}")
 
+        total = len(pdf.pages)
+        print(f"  {total} page(s) found. Extracting...", flush=True)
+
         for page_num, page in enumerate(
-            tqdm(pdf.pages, desc=f"  {path.name}", unit="pg", leave=False),
+            tqdm(pdf.pages, desc=f"  {path.name}", unit="pg", leave=True,
+                 dynamic_ncols=True, miniters=1),
             start=1,
         ):
             raw_text = page.extract_text() or ""
@@ -356,13 +361,14 @@ def extract_w2_batch(input_dir: str, output_csv: str, part_size: int = 1000) -> 
         return
 
     frames = []
-    for pdf_path in tqdm(sorted(pdf_files), desc="Processing PDFs", unit="file"):
+    for idx, pdf_path in enumerate(sorted(pdf_files), start=1):
+        print(f"\n[{idx}/{len(pdf_files)}] {pdf_path.name}", flush=True)
         try:
             df = extract_w2(str(pdf_path))
             frames.append(df)
-            tqdm.write(f"  [OK]  {pdf_path.name}")
+            print(f"  [OK]  {len(df)} records", flush=True)
         except Exception as exc:
-            tqdm.write(f"  [ERR] {pdf_path.name}: {exc}")
+            print(f"  [ERR] {exc}", flush=True)
 
     if frames:
         combined = pd.concat(frames, ignore_index=True)
