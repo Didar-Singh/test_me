@@ -1,41 +1,39 @@
 """
 Scanned PDF OCR Extractor
-Converts scanned PDF pages to images, runs Tesseract OCR, and saves output
-as plain text files and/or a structured CSV/Excel workbook.
+Converts scanned PDF pages to images using PyMuPDF (no Poppler needed),
+runs Tesseract OCR, and saves output as text files, CSV, and Excel.
 
-Requirements:
-    pip install pytesseract pdf2image pandas openpyxl tqdm Pillow
+Requirements (no external binaries except Tesseract):
+    pip install pymupdf pytesseract pandas openpyxl tqdm Pillow
 
-External dependency (must be installed separately):
-    - Tesseract OCR:  https://github.com/UB-Mannheim/tesseract/wiki  (Windows installer)
-    - Poppler:        https://github.com/oschwartz10612/poppler-windows/releases  (Windows)
-      After installing, add both bin directories to PATH, or set the paths below.
+External dependency:
+    - Tesseract OCR: https://github.com/UB-Mannheim/tesseract/wiki
+      Install, then either add to PATH or set TESSERACT_CMD below.
 """
 
 import os
 import sys
-import csv
 import logging
 from pathlib import Path
 
+import fitz                  # PyMuPDF — no Poppler required
 import pytesseract
-from pdf2image import convert_from_path
 from PIL import Image
 import pandas as pd
 from tqdm import tqdm
+from openpyxl.styles import Alignment
+from openpyxl.utils import get_column_letter
 
-# ── Optional: set explicit paths if not on PATH ───────────────────────────────
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-# POPPLER_PATH = r"C:\poppler\Library\bin"   # set to None if Poppler is on PATH
-POPPLER_PATH = None
+# ── Tesseract path (update if moved) ─────────────────────────────────────────
+pytesseract.pytesseract.tesseract_cmd = r"C:\Users\DidarSingh\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OCR_LANG        = "eng"          # Tesseract language code(s), e.g. "eng+fra"
-DPI             = 300            # Higher = better accuracy, slower
-SAVE_TXT        = True           # Write one .txt file per PDF
-SAVE_CSV        = True           # Write combined CSV
-SAVE_EXCEL      = True           # Write combined Excel workbook
-OUTPUT_SUBDIR   = "ocr_output"   # Sub-folder created next to the input PDFs
+OCR_LANG      = "eng"        # Tesseract language, e.g. "eng+fra"
+DPI           = 300          # Rendering DPI — higher = better accuracy, slower
+SAVE_TXT      = True         # One .txt file per PDF
+SAVE_CSV      = True         # One .csv per PDF + combined ALL_ocr_results.csv
+SAVE_EXCEL    = True         # One .xlsx per PDF + combined ALL_ocr_results.xlsx
+OUTPUT_SUBDIR = "ocr_output" # Created next to the source PDF(s)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,147 +43,137 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ── Core functions ────────────────────────────────────────────────────────────
+# ── Core ──────────────────────────────────────────────────────────────────────
 
-def ocr_page(image: Image.Image) -> str:
-    """Run Tesseract on a single PIL image and return extracted text."""
-    return pytesseract.image_to_string(image, lang=OCR_LANG)
+def pdf_to_images(pdf_path: Path) -> list[Image.Image]:
+    """Render each PDF page to a PIL Image using PyMuPDF (no Poppler)."""
+    doc    = fitz.open(str(pdf_path))
+    zoom   = DPI / 72.0          # 72 dpi is PyMuPDF's default
+    matrix = fitz.Matrix(zoom, zoom)
+    images = []
+    for page in doc:
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append(img)
+    doc.close()
+    return images
 
 
-def extract_pdf(pdf_path: str, output_dir: str) -> list[dict]:
-    """
-    OCR all pages of a scanned PDF.
-    Returns a list of row-dicts: {file, page, text}.
-    """
-    pdf_path   = Path(pdf_path)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def ocr_image(img: Image.Image) -> str:
+    return pytesseract.image_to_string(img, lang=OCR_LANG).strip()
 
-    log.info("Opening: %s", pdf_path.name)
 
-    convert_kwargs = {"dpi": DPI, "fmt": "jpeg"}
-    if POPPLER_PATH:
-        convert_kwargs["poppler_path"] = POPPLER_PATH
+def extract_pdf(pdf_path: Path, out_dir: Path) -> list[dict]:
+    log.info("Processing: %s", pdf_path.name)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        pages = convert_from_path(str(pdf_path), **convert_kwargs)
+        images = pdf_to_images(pdf_path)
     except Exception as exc:
-        log.error("Failed to convert %s: %s", pdf_path.name, exc)
+        log.error("Could not render %s: %s", pdf_path.name, exc)
         return []
 
-    rows          = []
-    page_texts    = []
+    rows       = []
+    page_texts = []
 
     for page_num, img in enumerate(
-        tqdm(pages, desc=f"  {pdf_path.name}", unit="page", leave=False), start=1
+        tqdm(images, desc=f"  {pdf_path.name}", unit="pg", leave=False), start=1
     ):
-        text = ocr_page(img).strip()
+        text = ocr_image(img)
         page_texts.append(f"=== Page {page_num} ===\n{text}\n")
         rows.append({
-            "File Name":       pdf_path.name,
-            "Page Number":     page_num,
-            "Extracted Text":  text,
+            "File Name":      pdf_path.name,
+            "Page Number":    page_num,
+            "Extracted Text": text,
         })
 
     if SAVE_TXT:
-        txt_path = output_dir / f"{pdf_path.stem}_ocr.txt"
+        txt_path = out_dir / f"{pdf_path.stem}_ocr.txt"
         txt_path.write_text("\n".join(page_texts), encoding="utf-8")
-        log.info("  Saved text → %s", txt_path.name)
+        log.info("  TXT  → %s", txt_path.name)
 
     return rows
 
 
-# ── Output writers ─────────────────────────────────────────────────────────────
+# ── Writers ───────────────────────────────────────────────────────────────────
 
-def save_csv(rows: list[dict], output_dir: Path, filename: str = "ocr_results.csv"):
+def save_csv(rows: list[dict], out_dir: Path, name: str):
     if not rows:
         return
-    path = output_dir / filename
-    df   = pd.DataFrame(rows)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-    log.info("CSV saved → %s  (%d rows)", path, len(df))
+    path = out_dir / name
+    pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+    log.info("  CSV  → %s  (%d rows)", name, len(rows))
 
 
-def save_excel(rows: list[dict], output_dir: Path, filename: str = "ocr_results.xlsx"):
+def save_excel(rows: list[dict], out_dir: Path, name: str):
     if not rows:
         return
-    path = output_dir / filename
+    path = out_dir / name
     df   = pd.DataFrame(rows)
+
+    col_widths = {"File Name": 35, "Page Number": 12, "Extracted Text": 120}
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="OCR Results")
         ws = writer.sheets["OCR Results"]
 
-        # Auto-fit columns (cap at 120 for the text column)
-        col_widths = {"File Name": 35, "Page Number": 12, "Extracted Text": 120}
         for col_idx, col_name in enumerate(df.columns, start=1):
-            from openpyxl.utils import get_column_letter
-            ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(
-                col_name, 20
-            )
+            ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_name, 20)
 
-        # Wrap text in the extracted-text column and set row height
         for row in ws.iter_rows(min_row=2, min_col=3, max_col=3):
             for cell in row:
-                cell.alignment = __import__("openpyxl").styles.Alignment(
-                    wrap_text=True, vertical="top"
-                )
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
                 ws.row_dimensions[cell.row].height = 80
 
-    log.info("Excel saved → %s  (%d rows)", path, len(df))
+    log.info("  XLSX → %s  (%d rows)", name, len(rows))
 
 
-# ── Batch runner ───────────────────────────────────────────────────────────────
+def _write_outputs(rows: list[dict], out_dir: Path, stem: str):
+    if SAVE_CSV:
+        save_csv(rows, out_dir, f"{stem}_ocr.csv")
+    if SAVE_EXCEL:
+        save_excel(rows, out_dir, f"{stem}_ocr.xlsx")
+
+
+# ── Runners ───────────────────────────────────────────────────────────────────
+
+def process_file(pdf_path: str, output_dir: str | None = None):
+    p        = Path(pdf_path)
+    out_root = Path(output_dir) if output_dir else p.parent / OUTPUT_SUBDIR
+
+    rows = extract_pdf(p, out_root)
+    _write_outputs(rows, out_root, p.stem)
+    log.info("Done → %s", out_root)
+
 
 def process_folder(folder: str, output_dir: str | None = None):
-    folder     = Path(folder)
-    out_root   = Path(output_dir) if output_dir else folder / OUTPUT_SUBDIR
-    out_root.mkdir(parents=True, exist_ok=True)
+    folder   = Path(folder)
+    out_root = Path(output_dir) if output_dir else folder / OUTPUT_SUBDIR
 
     pdf_files = sorted(folder.glob("*.pdf"))
     if not pdf_files:
         log.warning("No PDF files found in: %s", folder)
         return
 
-    log.info("Found %d PDF file(s) in %s", len(pdf_files), folder)
+    log.info("Found %d PDF(s) in %s", len(pdf_files), folder)
 
     all_rows: list[dict] = []
 
     for pdf_path in pdf_files:
-        rows = extract_pdf(str(pdf_path), str(out_root))
+        rows = extract_pdf(pdf_path, out_root)
         all_rows.extend(rows)
+        _write_outputs(rows, out_root, pdf_path.stem)   # per-file output
 
-        # Individual output named after each source file
-        if SAVE_CSV:
-            save_csv(rows, out_root, f"{pdf_path.stem}_ocr.csv")
-        if SAVE_EXCEL:
-            save_excel(rows, out_root, f"{pdf_path.stem}_ocr.xlsx")
-
-    # Combined summary across all files
+    # Combined across all files
     if SAVE_CSV:
         save_csv(all_rows, out_root, "ALL_ocr_results.csv")
     if SAVE_EXCEL:
         save_excel(all_rows, out_root, "ALL_ocr_results.xlsx")
 
-    log.info("Done. Output folder: %s", out_root)
+    log.info("Done → %s", out_root)
 
 
-def process_file(pdf_path: str, output_dir: str | None = None):
-    pdf_path = Path(pdf_path)
-    out_root = Path(output_dir) if output_dir else pdf_path.parent / OUTPUT_SUBDIR
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    rows = extract_pdf(str(pdf_path), str(out_root))
-
-    if SAVE_CSV:
-        save_csv(rows, out_root, f"{pdf_path.stem}_ocr.csv")
-    if SAVE_EXCEL:
-        save_excel(rows, out_root, f"{pdf_path.stem}_ocr.xlsx")
-
-    log.info("Done. Output folder: %s", out_root)
-
-
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     args = sys.argv[1:]
@@ -195,12 +183,10 @@ def main():
         return
 
     if os.path.isdir(args[0]):
-        out_dir = args[1] if len(args) > 1 else None
-        process_folder(args[0], out_dir)
+        process_folder(args[0], args[1] if len(args) > 1 else None)
 
     elif os.path.isfile(args[0]) and args[0].lower().endswith(".pdf"):
-        out_dir = args[1] if len(args) > 1 else None
-        process_file(args[0], out_dir)
+        process_file(args[0], args[1] if len(args) > 1 else None)
 
     else:
         print("Usage:")
