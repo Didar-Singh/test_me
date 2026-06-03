@@ -130,24 +130,90 @@ def extract_inline_fields(text, fields, verbose=False):
     for col_name, field_pattern in fields:
         if col_name in results:
             continue
+        value = ""
+        # Pattern 1: value on same line  →  "Field: value"
         pattern = (
             rf"(?:{field_pattern})"
             rf"\s*[:\-]\s*"
             rf"([^\n]*?)"
             rf"(?=\s*(?:{lookahead})\s*[:\-]|\s*$)"
         )
-        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
-        if match:
-            value = match.group(1).strip().strip("|").strip()
-            if value:
-                results[col_name] = value
-            elif verbose:
-                missing.append(col_name)
+        m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if m:
+            value = m.group(1).strip().strip("|").strip()
+        # Pattern 2: value on next non-empty line  →  "Field:\n\nvalue"
+        if not value:
+            nl_pat = (
+                rf"(?:{field_pattern})"
+                rf"\s*[:\-]\s*\n"
+                rf"(?:[ \t]*\n)*"
+                rf"((?!(?:{lookahead})\s*[:\-])[^\n]+)"
+            )
+            m2 = re.search(nl_pat, text, re.IGNORECASE | re.MULTILINE)
+            if m2:
+                value = m2.group(1).strip().strip("|").strip()
+        if value:
+            results[col_name] = value
         elif verbose:
             missing.append(col_name)
     if verbose and missing:
         print(f"    Missing: {', '.join(missing)}")
     return results
+
+
+_FORM_TITLE_RE = re.compile(
+    r"(?:new\s+hire\s+form|payroll\s+change|lindenmeyr|adp\s+workforce|pay\s+profile)",
+    re.IGNORECASE,
+)
+
+
+def extract_positional_fields(text, fields):
+    """
+    Fallback for PDFs where labels appear as 'Field:' (no inline value)
+    and matching values follow in document order in a separate block below.
+    """
+    lines = [ln.strip() for ln in text.splitlines()]
+
+    label_only_res = [
+        (name, re.compile(rf"^(?:{pat})\s*[:\-]\s*$", re.IGNORECASE))
+        for name, pat in fields
+    ]
+    any_inline_re = re.compile(
+        r"(?:" + "|".join(rf"(?:{pat})" for _, pat in fields) + r")\s*[:\-]\s*\S",
+        re.IGNORECASE,
+    )
+
+    ordered_labels = []
+    seen = set()
+    for i, line in enumerate(lines):
+        for col_name, pat in label_only_res:
+            if col_name not in seen and pat.match(line):
+                ordered_labels.append((i, col_name))
+                seen.add(col_name)
+                break
+
+    if not ordered_labels:
+        return {}
+
+    last_label_line = ordered_labels[-1][0]
+    value_lines = []
+    for i in range(last_label_line + 1, len(lines)):
+        line = lines[i]
+        if not line or _FORM_TITLE_RE.search(line):
+            continue
+        if re.match(r"^(?:===|---|\*\*\*|Page \d+)", line):
+            continue
+        if any_inline_re.search(line):
+            break
+        if any(pat.match(line) for _, pat in label_only_res):
+            continue
+        value_lines.append(line)
+
+    return {
+        col_name: val
+        for (_, col_name), val in zip(ordered_labels, value_lines)
+        if val
+    }
 
 
 def extract_adp_fields(text, verbose=False):
@@ -200,6 +266,12 @@ def parse_file(path, verbose=False):
         extracted = extract_adp_fields(text, verbose=verbose)
     else:
         extracted = extract_inline_fields(text, fields, verbose=verbose)
+        if len(extracted) < len(fields):
+            pos = extract_positional_fields(text, fields)
+            added = {k: v for k, v in pos.items() if k not in extracted}
+            extracted.update(added)
+            if verbose and added:
+                print(f"    Positional: {', '.join(added)}")
     return {"File Number": path.stem, "Form Type": form_type, **extracted}
 
 
