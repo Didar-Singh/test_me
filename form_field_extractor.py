@@ -32,7 +32,7 @@ from pathlib import Path
 NEW_HIRE_FIELDS = [
     ("Employee Name",          r"Employee Name"),
     ("Today's Date",           r"Today.s Date"),
-    ("Social Security Number", r"Social Security Number"),
+    ("Social Security Number", r"(?:Social\s+Security\s+(?:Number|No\.?|#)|S\.?S\.?N\.?)"),
     ("Date of Hire",           r"Date of Hire"),
     ("Street Address",         r"Street Address"),
     ("City, State, Zip",       r"City,?\s*State,?\s*Zip"),
@@ -43,7 +43,7 @@ NEW_HIRE_FIELDS = [
     ("Badge No",               r"Badge No"),
     ("SSN Verified",           r"SSN Verified"),
     ("Gender",                 r"Gender"),
-    ("Date of Birth",          r"Date of Birth"),
+    ("Date of Birth",          r"(?:Date\s+of\s+Birth|D\.?O\.?B\.?|Birth\s+Date)"),
     ("Marital Status",         r"Marital Status"),
     ("Race",                   r"Race"),
     ("Office Location",        r"Office Location"),
@@ -162,7 +162,9 @@ def extract_inline_fields(text, fields, verbose=False):
 
 
 _FORM_TITLE_RE = re.compile(
-    r"(?:new\s+hire\s+form|payroll\s+change|lindenmeyr|adp\s+workforce|pay\s+profile)",
+    r"(?:new\s+hire\s+form|payroll\s+change|lindenmeyr|adp\s+workforce|pay\s+profile"
+    r"|payroll\s+use\s+only|for\s+payroll\s+use|hr\s+use\s+only|office\s+use\s+only"
+    r"|employee\s+information|personal\s+information)",
     re.IGNORECASE,
 )
 
@@ -204,7 +206,9 @@ def extract_positional_fields(text, fields):
         if re.match(r"^(?:===|---|\*\*\*|Page \d+)", line):
             continue
         if any_inline_re.search(line):
-            break
+            if len(value_lines) >= len(ordered_labels):
+                break
+            continue  # haven't collected all positional values yet; skip this inline field
         if any(pat.match(line) for _, pat in label_only_res):
             continue
         value_lines.append(line)
@@ -261,6 +265,7 @@ def extract_adp_fields(text, verbose=False):
 
 def parse_file(path, verbose=False):
     text = path.read_text(encoding="utf-8", errors="ignore")
+    text = text.replace(' ', ' ')  # normalize non-breaking spaces common in PDF extraction
     form_type, fields = detect_form_type(text)
     if fields is None:
         extracted = extract_adp_fields(text, verbose=verbose)
