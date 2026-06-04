@@ -7,10 +7,40 @@ Layout: 3 columns per employee record
 Multiple employees stacked vertically per page.
 Employee records separated by blank lines / new name blocks.
 
-Usage:
-  python extract_adp.py yourfile.pdf
-  python extract_adp.py yourfile.pdf output.xlsx
-  python extract_adp.py yourfile.pdf --debug
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ COMMANDS & EXAMPLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ 1. Basic — process entire PDF, auto-name output:
+       python extract_adp.py myfile.pdf
+
+ 2. Custom output filename:
+       python extract_adp.py myfile.pdf results.xlsx
+
+ 3. Process specific page range (e.g. pages 2 to 5):
+       python extract_adp.py myfile.pdf --pages 2-5
+
+ 4. Process specific page range + custom output:
+       python extract_adp.py myfile.pdf results.xlsx --pages 2-5
+
+ 5. Single page test (e.g. just page 3):
+       python extract_adp.py myfile.pdf --pages 3-3
+
+ 6. Debug mode — prints raw text per column per employee:
+       python extract_adp.py myfile.pdf --debug
+
+ 7. Debug on a page range (best for troubleshooting):
+       python extract_adp.py myfile.pdf --pages 1-2 --debug
+
+ 8. Install required libraries (run once):
+       pip install pdfplumber openpyxl tqdm
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FLAGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  --pages FROM-TO   Only process pages FROM through TO (1-based)
+  --debug           Print raw extracted text per employee block
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import re, sys
@@ -22,7 +52,22 @@ from pathlib import Path
 from tqdm import tqdm
 
 DEBUG = "--debug" in sys.argv
-args  = [a for a in sys.argv[1:] if not a.startswith("--")]
+
+# Parse --pages FROM-TO flag
+PAGE_FROM = None
+PAGE_TO   = None
+for arg in sys.argv[1:]:
+    m = re.match(r"--pages\s*[=:]?\s*(\d+)[-:](\d+)$", arg)
+    if m:
+        PAGE_FROM = int(m.group(1))
+        PAGE_TO   = int(m.group(2))
+        break
+    m2 = re.match(r"--pages\s*[=:]?\s*(\d+)$", arg)
+    if m2:
+        PAGE_FROM = PAGE_TO = int(m2.group(1))
+        break
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -262,16 +307,33 @@ def parse_record(page, y0, y1, page_num):
 
 # ── process full PDF ──────────────────────────────────────────────────────────
 
-def extract_all(pdf_path):
+def extract_all(pdf_path, page_from=None, page_to=None):
     employees = []
 
     with pdfplumber.open(pdf_path) as pdf:
         total = len(pdf.pages)
-        print(f"  Pages: {total}")
 
-        with tqdm(total=total, desc="📄 Reading pages",
+        # Resolve page range (1-based input -> 0-based index)
+        p_from = max(1, page_from) if page_from else 1
+        p_to   = min(total, page_to) if page_to else total
+
+        if p_from > total or p_from > p_to:
+            print(f"\n  ❌ Invalid page range {p_from}-{p_to} (PDF has {total} pages)")
+            return []
+
+        page_indices = range(p_from - 1, p_to)   # convert to 0-based
+        page_count   = len(page_indices)
+
+        print(f"  Total pages in PDF : {total}")
+        if page_from or page_to:
+            print(f"  Processing pages   : {p_from} to {p_to}  ({page_count} page(s))")
+        else:
+            print(f"  Processing pages   : all {total}")
+
+        with tqdm(total=page_count, desc="📄 Reading pages",
                   unit="pg", colour="cyan", ncols=65) as pbar:
-            for page_num, page in enumerate(pdf.pages):
+            for page_num in page_indices:
+                page   = pdf.pages[page_num]
                 bounds = find_employee_boundaries(page)
 
                 if DEBUG:
@@ -436,21 +498,32 @@ if __name__ == "__main__":
         print(f"\n❌ File not found: {pdf_path}")
         sys.exit(1)
 
+    # Build flags summary for display
+    flags = []
+    if PAGE_FROM or PAGE_TO:
+        flags.append(f"pages {PAGE_FROM}-{PAGE_TO}")
+    if DEBUG:
+        flags.append("DEBUG")
+    flags_str = "  " + " | ".join(flags) if flags else ""
+
     print(f"\n{'='*55}")
     print(f"  ADP Master Control Extractor")
     print(f"{'='*55}")
     print(f"  Input : {pdf_path}")
     print(f"  Output: {out_path}")
-    if DEBUG: print(f"  Mode  : DEBUG")
+    if flags_str:
+        print(f"  Flags :{flags_str}")
     print(f"{'='*55}")
 
-    employees = extract_all(pdf_path)
+    employees = extract_all(pdf_path, page_from=PAGE_FROM, page_to=PAGE_TO)
     print(f"\n  👥 Records found: {len(employees)}")
 
     if not employees:
         print("\n  ❌ No records extracted.")
-        print("  Try debug mode to see raw text:")
-        print(f"     python extract_adp.py \"{pdf_path}\" --debug\n")
+        print("  Tips:")
+        print(f"    • Debug mode  : python extract_adp.py \"{pdf_path}\" --debug")
+        print(f"    • Single page : python extract_adp.py \"{pdf_path}\" --pages 1-1 --debug")
+        print(f"    • Check range : python extract_adp.py \"{pdf_path}\" --pages 1-3\n")
         sys.exit(1)
 
     write_excel(employees, out_path)
