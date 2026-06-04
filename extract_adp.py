@@ -1,11 +1,36 @@
 """
 ADP Master Control Report - Extractor
 ======================================
-Layout: 3 columns per employee record
-  LEFT: PERSONNEL  |  MIDDLE: PAY  |  RIGHT: TAX STATUS
+Parses ADP Master Control PDFs where text reads linearly (top to bottom).
 
-Multiple employees stacked vertically per page.
-Employee records separated by blank lines / new name blocks.
+Each employee block structure (from raw text):
+  LAST,FIRST                         <- Name line
+  File: XXXXXX                       <- may be followed by (continued)
+  eVoucher                           <- optional marker
+  File: NNN  Status: ACTIVE/TERM
+  Dept: NNN  Sex: M/F
+  Cntl: NNN  Race: N
+  SSN: On File  Occup: N
+  Title: XXXXX
+  Cost:
+  COST-CENTER-VALUE
+  Dates
+  Hire: MM/DD/YYYY  Term: MM/DD/YYYY
+  Birth: MM/DD/YY   Date 6: MM/DD/YYYY
+  Date 8: MM/DD/YYYY
+  Qualified Pension                  <- optional
+  Employee & Dependents ...          <- optional coverage line
+  SUPERVISOR,NAME                    <- optional
+  Mailing & Home Address
+  123 STREET ST
+  City,ST ZIPCODE
+  --- PAY section ---
+  Gross: N.NN  Salary: N.NN  Bi-Wkly  Rate Calc: N  LWW: NN  NWW: NN
+  --- TAX section ---
+  Marital Status: S-SINGLE / M-MARRIED
+  Federal: NN Exemptions
+  59 PA SUIDI  / state lines
+  ...
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  COMMANDS & EXAMPLES
@@ -26,7 +51,7 @@ Employee records separated by blank lines / new name blocks.
  5. Single page test (e.g. just page 3):
        python extract_adp.py myfile.pdf --pages 3-3
 
- 6. Debug mode — prints raw text per column per employee:
+ 6. Debug mode — prints raw text + parsed fields per employee:
        python extract_adp.py myfile.pdf --debug
 
  7. Debug on a page range (best for troubleshooting):
@@ -39,30 +64,28 @@ Employee records separated by blank lines / new name blocks.
  FLAGS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   --pages FROM-TO   Only process pages FROM through TO (1-based)
-  --debug           Print raw extracted text per employee block
+  --debug           Print raw text and parsed fields per employee
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import re, sys
 import pdfplumber
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from pathlib import Path
 from tqdm import tqdm
 
 DEBUG = "--debug" in sys.argv
 
-# Parse --pages FROM-TO flag
-PAGE_FROM = None
-PAGE_TO   = None
+# Parse --pages FROM-TO
+PAGE_FROM = PAGE_TO = None
 for arg in sys.argv[1:]:
-    m = re.match(r"--pages\s*[=:]?\s*(\d+)[-:](\d+)$", arg)
+    m = re.match(r"--pages[=:]?(\d+)[-:](\d+)$", arg)
     if m:
-        PAGE_FROM = int(m.group(1))
-        PAGE_TO   = int(m.group(2))
+        PAGE_FROM, PAGE_TO = int(m.group(1)), int(m.group(2))
         break
-    m2 = re.match(r"--pages\s*[=:]?\s*(\d+)$", arg)
+    m2 = re.match(r"--pages[=:]?(\d+)$", arg)
     if m2:
         PAGE_FROM = PAGE_TO = int(m2.group(1))
         break
@@ -84,236 +107,201 @@ def mgrep(patterns, text, default=""):
         if v: return v
     return default
 
-def crop_text(page, x0, y0, x1, y1):
-    try:
-        return page.crop((x0, y0, x1, y1)).extract_text(x_tolerance=3, y_tolerance=3) or ""
-    except:
-        return ""
+# ── split full text into per-employee blocks ──────────────────────────────────
 
-# ── find employee record Y boundaries on page ─────────────────────────────────
+# Name line pattern: "LASTNAME,FIRSTNAME" or "LAST FIRST" — all caps, no digits
+NAME_RE = re.compile(
+    r"^([A-Z][A-Z'\-\.]+),([A-Z][A-Z'\-\.\s]+)$",
+    re.MULTILINE
+)
 
-def find_employee_boundaries(page):
+def split_into_blocks(text):
     """
-    Each employee starts with their name in the PERSONNEL column (left ~35% of page).
-    Name line pattern: ALL CAPS, may have comma (LAST,FIRST or LAST FIRST).
-    We detect these lines by scanning words in the left column only.
+    Split full PDF text into one block per employee.
+    Handles two cases:
+      1. Name on its own line:  "SINGH,DIDAR"
+      2. Name at end of line:   "Employee & Dependents Health Care Coverage KUMAR,MOHIT M."
+    In case 2, we normalise the text so the name starts on a new line before splitting.
     """
-    pw = page.width
-    ph = page.height
+    # Normalise: if a NAME pattern appears mid-line (after other text),
+    # insert a newline before it so NAME_RE can find it.
+    # Pattern: any WORD text, then space, then LAST,FIRST at end of line
+    INLINE_NAME_RE = re.compile(
+        r"([^\n]+?)\s+([A-Z][A-Z'\-\.]{1,},[A-Z][A-Z'\-\.\s]{1,})$",
+        re.MULTILINE
+    )
+    def _split_inline(m):
+        prefix = m.group(1).strip()
+        name   = m.group(2).strip()
+        # Only split if the prefix is NOT itself a bare name line
+        if re.match(r"^[A-Z][A-Z'\-\.,\s]{2,}$", prefix):
+            return m.group(0)   # already a name line, leave alone
+        return prefix + "\n" + name
+    text = INLINE_NAME_RE.sub(_split_inline, text)
 
-    # Only look at left 35% of page for name detection
-    left_col_x1 = pw * 0.35
-
-    words = page.extract_words(x_tolerance=3, y_tolerance=3)
-
-    # Find lines that look like employee names in left column
-    # Group words by their vertical position (top coordinate, rounded to 2px)
-    from collections import defaultdict
-    lines_by_y = defaultdict(list)
-    for w in words:
-        if w["x0"] < left_col_x1:
-            y_key = round(w["top"] / 2) * 2
-            lines_by_y[y_key].append(w)
-
-    # Header/footer keywords to skip
-    SKIP_WORDS = {
-        "PERSONNEL","PAY","TAX","STATUS","FILE","DEPT","CLOCK","SSN","TITLE",
-        "SEX","RACE","OCCUP","DATE","HIRE","BIRTH","DATES","GROSS","SALARY",
-        "MARITAL","FEDERAL","STATE","RATE","LWW","NWW","CONTINUED","PAGE",
-        "AUTOPAY","MASTER","CONTROL","TOTALSOURCE","COMPANY","CODE","ADP",
-        "EXEMPTIONS","BI-WKLY","RATE","CALC","STATUS","ACTIVE","TERM",
-        "SET","FOR","PURGE","(CONTINUED)"
-    }
-
-    name_ys = []
-    for y_key in sorted(lines_by_y.keys()):
-        line_words = sorted(lines_by_y[y_key], key=lambda w: w["x0"])
-        line_text  = " ".join(w["text"] for w in line_words).strip()
-
-        # Skip very short or purely numeric lines
-        if len(line_text) < 3 or re.match(r"^[\d\s\.\-/]+$", line_text):
-            continue
-
-        # Skip known header words
-        upper_words = set(line_text.upper().split())
-        if upper_words & SKIP_WORDS and not re.search(r"[,]", line_text):
-            continue
-
-        # Skip lines containing field labels like "File:", "Dept:", etc.
-        if re.search(r"\b(File|Dept|Clock|SSN|Title|Sex|Race|Occup|Hire|Birth|Date|Status|LWW|NWW)\s*[:\d]", line_text, re.I):
-            continue
-
-        # Name characteristics:
-        # - Mostly uppercase letters
-        # - May contain comma (LAST,FIRST)
-        # - 2+ words or one word >=4 chars
-        # - Starts with a capital letter
-        # - No numbers (except maybe address — but address comes AFTER name)
-        if re.match(r"^[A-Z][A-Z\s,\.\'\-]+$", line_text.upper()):
-            # Must be at least one real name-looking token
-            tokens = re.split(r"[,\s]+", line_text)
-            if any(len(t) >= 2 for t in tokens):
-                actual_y = line_words[0]["top"]
-                name_ys.append(actual_y)
-
-    if DEBUG:
-        print(f"  [page w={pw:.0f} h={ph:.0f}] Name Y positions: {[f'{y:.1f}' for y in name_ys]}")
-
-    if not name_ys:
+    matches = list(NAME_RE.finditer(text))
+    if not matches:
         return []
 
-    # Build vertical slices
-    boundaries = []
-    name_ys = sorted(name_ys)
-    for i, y in enumerate(name_ys):
-        y0 = max(0, y - 3)
-        y1 = (name_ys[i+1] - 3) if i + 1 < len(name_ys) else ph
-        boundaries.append((y0, y1))
+    blocks = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end   = matches[i+1].start() if i+1 < len(matches) else len(text)
+        blocks.append(text[start:end].strip())
 
-    return boundaries
+    return blocks
 
-# ── parse one employee record ─────────────────────────────────────────────────
+# ── parse one employee block ──────────────────────────────────────────────────
 
-def parse_record(page, y0, y1, page_num):
-    pw = page.width
-
-    # ADP Master Control 3-column split:
-    # PERSONNEL: 0 – ~35%
-    # PAY:      ~35% – ~60%
-    # TAX:      ~60% – 100%
-    personnel_txt = crop_text(page, 0,        y0, pw*0.36, y1)
-    pay_txt       = crop_text(page, pw*0.36,  y0, pw*0.60, y1)
-    tax_txt       = crop_text(page, pw*0.60,  y0, pw,      y1)
+def parse_block(block):
+    rec = {}
+    lines = [l.strip() for l in block.splitlines()]
+    # Full block as single searchable string
+    txt = block
 
     if DEBUG:
-        print(f"\n{'─'*60}")
-        print(f"  PAGE {page_num}  y={y0:.0f}-{y1:.0f}")
-        print(f"  [PERSONNEL]\n{personnel_txt}")
-        print(f"  [PAY]\n{pay_txt}")
-        print(f"  [TAX]\n{tax_txt}")
-
-    rec = {"_page": page_num}
-    p_lines = [l.strip() for l in personnel_txt.splitlines() if l.strip()]
+        print(f"\n{'═'*60}")
+        print(f"RAW BLOCK:\n{block[:800]}")
+        print(f"{'─'*60}")
 
     # ── NAME ──────────────────────────────────────────────────────────────────
-    SKIP = {"PERSONNEL","PAY","TAX","STATUS","FILE","DEPT","CLOCK","SSN",
-            "TITLE","SEX","RACE","OCCUP","DATES","DATE","HIRE","BIRTH",
-            "GROSS","SALARY","MARITAL","FEDERAL","(CONTINUED)","CONTINUED"}
-    name_raw = ""
-    for ln in p_lines[:5]:
-        toks = set(ln.upper().split(",")[0].split())
-        if toks & SKIP:
-            continue
-        if re.match(r"^[A-Z][A-Z\s,\.\'\-]+$", ln.upper()) and len(ln) >= 3:
-            name_raw = ln.strip()
-            break
-
-    if name_raw:
-        if "," in name_raw:
-            parts = name_raw.split(",", 1)
-            rec["Last Name"]  = clean(parts[0])
-            rec["First Name"] = clean(parts[1])
-        else:
-            toks = name_raw.split()
-            rec["Last Name"]  = " ".join(toks[:-1]) if len(toks) > 1 else name_raw
-            rec["First Name"] = toks[-1] if len(toks) > 1 else ""
+    first_line = lines[0] if lines else ""
+    if "," in first_line:
+        parts = first_line.split(",", 1)
+        rec["Last Name"]  = clean(parts[0])
+        rec["First Name"] = clean(parts[1])
     else:
-        rec["Last Name"] = rec["First Name"] = ""
+        toks = first_line.split()
+        rec["Last Name"]  = " ".join(toks[:-1]) if len(toks) > 1 else first_line
+        rec["First Name"] = toks[-1] if len(toks) > 1 else ""
 
-    # ── ADDRESS (present on some records) ─────────────────────────────────────
-    # Address appears right after name: street line, then city,state zip
-    addr1 = addr2 = city = state = zipcode = ""
-    street_m = re.search(
-        r"(?:^|\n)(\d+\s+[A-Z0-9\s]+(?:RD|ST|AVE|DR|LN|WAY|BLVD|CT|PL|TERR?|HWY|PIKE|ROAD|STREET|AVENUE|DRIVE|LANE)\b[^\n]*)",
-        personnel_txt, re.IGNORECASE | re.MULTILINE)
-    if street_m:
-        addr1 = clean(street_m.group(1))
-        # city,state zip usually on next line
-        after = personnel_txt[street_m.end():]
-        csz_m = re.search(r"([A-Z\s]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)", after, re.IGNORECASE)
-        if csz_m:
-            city    = clean(csz_m.group(1))
-            state   = clean(csz_m.group(2))
-            zipcode = clean(csz_m.group(3))
-        else:
-            # Try "CITY ST ZIP" without comma
-            csz_m2 = re.search(r"([A-Z\s]{2,})\s+([A-Z]{2})\s+(\d{5})", after, re.IGNORECASE)
-            if csz_m2:
-                city    = clean(csz_m2.group(1))
-                state   = clean(csz_m2.group(2))
-                zipcode = clean(csz_m2.group(3))
+    rec["Continued"] = "Yes" if re.search(r"\(continued\)", txt, re.I) else ""
 
-    rec["Address"]  = addr1
-    rec["City"]     = city
-    rec["State"]    = state
-    rec["Zip"]      = zipcode
+    # ── FILE # ────────────────────────────────────────────────────────────────
+    # Two File: lines possible — first is the display file#, second has Status
+    file_nums = re.findall(r"File:\s*(\d+)", txt, re.I)
+    rec["File #"] = file_nums[0] if file_nums else ""
 
     # ── PERSONNEL FIELDS ──────────────────────────────────────────────────────
-    rec["File #"]   = mgrep([r"File[:\s]+(\d+)", r"File\s*[:#]\s*(\w+)"], personnel_txt)
-    rec["Dept"]     = grep(r"Dept[:\s]+(\S+)", personnel_txt)
-    rec["Clock"]    = grep(r"Clock[:\s]+(\S+)", personnel_txt)
-    rec["SSN"]      = grep(r"SSN[:\s]+(\S+)", personnel_txt)
-    rec["Title"]    = grep(r"Title[:\s]+(\S+)", personnel_txt)
-    rec["Sex"]      = grep(r"Sex[:\s]+(\w)", personnel_txt)
-    rec["Race"]     = grep(r"Race[:\s]+(\w+)", personnel_txt)
-    rec["Occup"]    = grep(r"Occup[:\s]+(\w+)", personnel_txt)
-    rec["Status"]   = grep(r"Status[:\s]+(\w+)", personnel_txt)
-    rec["Set for Purge"] = "Yes" if re.search(r"Set\s+for\s+Purge", personnel_txt, re.I) else ""
+    rec["Status"]   = grep(r"Status:\s*(\w+)", txt)
+    rec["Dept"]     = grep(r"Dept:\s*(\S+)", txt)
+    rec["Sex"]      = grep(r"Sex:\s*(\w)", txt)
+    rec["Cntl"]     = grep(r"Cntl:\s*(\S+)", txt)
+    rec["Race"]     = grep(r"Race:\s*(\w+)", txt)
+    rec["SSN"]      = grep(r"SSN:\s*([^\n]+?)(?=\s{2,}|\s+Occup|\n)", txt)
+    rec["Occup"]    = grep(r"Occup:\s*(\w+)", txt)
+    rec["Title"]    = grep(r"Title:\s*(\S+)", txt)
+    rec["eVoucher"] = "Yes" if re.search(r"eVoucher", txt, re.I) else ""
+    rec["Qualified Pension"] = "Yes" if re.search(r"Qualified\s+Pension", txt, re.I) else ""
+    rec["Health Coverage"]   = grep(r"(Employee\s*[&and]+\s*Dependents[^\n]+)", txt)
+
+    # ── COST CENTER ───────────────────────────────────────────────────────────
+    # "Cost:" on one line, value on next line(s) until "Dates"
+    cost_m = re.search(r"Cost:\s*\n(.*?)(?=\nDates|\nHire:|\neVoucher)", txt, re.DOTALL | re.I)
+    if cost_m:
+        rec["Cost"] = clean(cost_m.group(1).replace("\n", " "))
+    else:
+        rec["Cost"] = grep(r"Cost:\s*([^\n]+)", txt)
 
     # ── DATES ─────────────────────────────────────────────────────────────────
-    rec["Date 1"]    = grep(r"Date\s*1[:\s]+([\d/]+)", personnel_txt)
-    rec["Date 3"]    = grep(r"Date\s*3[:\s]+([\d/]+)", personnel_txt)
-    rec["Hire Date"] = mgrep([r"Hire[:\s]+([\d/]+)", r"Hire\s+Date[:\s]+([\d/]+)"], personnel_txt)
-    rec["Birth Date"]= mgrep([r"Birth[:\s]+([\d/]+)", r"DOB[:\s]+([\d/]+)"], personnel_txt)
-    rec["Date 9"]    = grep(r"Date\s*9[:\s]+([\d/]+)", personnel_txt)
+    rec["Hire Date"]  = grep(r"Hire:\s*([\d/]+)", txt)
+    rec["Term Date"]  = grep(r"Term:\s*([\d/]+)", txt)
+    rec["Birth Date"] = grep(r"Birth:\s*([\d/]+)", txt)
+    rec["Date 6"]     = grep(r"Date\s*6:\s*([\d/]+)", txt)
+    rec["Date 8"]     = grep(r"Date\s*8:\s*([\d/]+)", txt)
+    rec["Date 9"]     = grep(r"Date\s*9:\s*([\d/]+)", txt)
+    rec["Date 1"]     = grep(r"Date\s*1:\s*([\d/]+)", txt)
+    rec["Date 3"]     = grep(r"Date\s*3:\s*([\d/]+)", txt)
 
-    # ── PAY FIELDS ────────────────────────────────────────────────────────────
-    rec["Gross"]     = mgrep([r"Gross[:\s]+([\d,\.]+)", r"Gross\s+Pay[:\s]+([\d,\.]+)"], pay_txt)
-    rec["Salary"]    = grep(r"Salary[:\s]+([\d,\.]+)", pay_txt)
-    rec["Bi-Wkly"]   = grep(r"Bi-Wkly[:\s]+([\d,\.]+)", pay_txt)
-    rec["Rate Calc"] = grep(r"Rate\s*Calc[:\s]+(\w+)", pay_txt)
-    rec["LWW"]       = grep(r"LWW[:\s]+(\d+)", pay_txt)
-    rec["NWW"]       = grep(r"NWW[:\s]+(\d+)", pay_txt)
+    # ── ADDRESS ───────────────────────────────────────────────────────────────
+    addr_m = re.search(
+        r"Mailing\s*[&]\s*Home\s*Address\s*\n(.*?)(?=\n\n|\nGross:|\nSalary:|\nPAY|\nTAX|\Z)",
+        txt, re.DOTALL | re.I
+    )
+    if addr_m:
+        addr_lines = [l.strip() for l in addr_m.group(1).splitlines() if l.strip()]
+        rec["Address Line 1"] = addr_lines[0] if len(addr_lines) > 0 else ""
+        rec["Address Line 2"] = addr_lines[1] if len(addr_lines) > 1 else ""
+        # city,state zip — last address line
+        city_line = addr_lines[-1] if addr_lines else ""
+        csz = re.search(r"^(.*?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$", city_line, re.I)
+        if csz:
+            rec["City"]  = clean(csz.group(1))
+            rec["State"] = csz.group(2).upper()
+            rec["Zip"]   = csz.group(3)
+        else:
+            # Try without comma: "New York NY 10466"
+            csz2 = re.search(r"^(.*?)\s+([A-Z]{2})\s+(\d{5})$", city_line, re.I)
+            if csz2:
+                rec["City"]  = clean(csz2.group(1))
+                rec["State"] = csz2.group(2).upper()
+                rec["Zip"]   = csz2.group(3)
+            else:
+                rec["City/State/Zip"] = city_line
+    else:
+        rec["Address Line 1"] = rec["Address Line 2"] = ""
 
-    # ── TAX STATUS FIELDS ─────────────────────────────────────────────────────
-    rec["Marital Status"] = mgrep([
-        r"Marital\s+Status[:\s]+(\S+)",
-        r"M-(\w+)",
-        r"S-(\w+)",
-    ], tax_txt)
-    # Full marital line e.g. "Marital Status: S-SINGLE" or "Marital Status: M-MARRIED"
-    ms = grep(r"Marital\s+Status[:\s]*([^\n]+)", tax_txt)
-    if ms:
-        rec["Marital Status"] = ms
+    # ── PAY ───────────────────────────────────────────────────────────────────
+    rec["Gross"]     = mgrep([r"Gross:\s*([\d,\.]+)", r"Gross\s+([\d,\.]+)"], txt)
+    rec["Salary"]    = grep(r"Salary:\s*([\d,\.]+)", txt)
+    rec["Bi-Wkly"]   = grep(r"Bi-Wkly\s*[:\s]*([\d,\.]+)", txt)
+    rec["Rate Calc"] = grep(r"Rate\s*Calc:\s*(\w+)", txt)
+    rec["LWW"]       = grep(r"LWW:\s*(\d+)", txt)
+    rec["NWW"]       = grep(r"NWW:\s*(\d+)", txt)
+    rec["Std Hours"] = grep(r"Std\s*Hours:\s*([\d\.]+)", txt)
+    rec["Pay Group"] = grep(r"Pay\s*Group:\s*(\d+)", txt)
 
+    # ── TAX ───────────────────────────────────────────────────────────────────
+    rec["Marital Status"]     = grep(r"Marital\s+Status:\s*([^\n]+)", txt)
     rec["Federal Exemptions"] = mgrep([
         r"Federal[:\s]+(\d+)\s*Exemptions?",
-        r"(\d+)\s*Exemptions?\s*Federal",
-        r"Federal\s*\n\s*(\d+)\s*Exemptions?",
-    ], tax_txt)
+        r"(\d+)\s*Exemptions?\s*\n.*Federal",
+    ], txt)
+    rec["Federal Extra W/H"]  = grep(r"Extra\s*W[/\\]H\s*\$?([\d,\.]+)", txt)
 
-    # State lines: "59 PA SUIDI", "401D DOYLESTOWN B", "09 PA" etc.
-    state_lines = re.findall(r"(\d{2,4}[A-Z0-9\s]+(?:SUIDI?|LOCAL|SUI|SDI|[A-Z]{2})?\b[^\n]*)", tax_txt)
-    rec["State Tax Lines"] = "; ".join(clean(s) for s in state_lines[:4])
+    # State tax lines — collect all state-looking lines
+    state_lines = re.findall(
+        r"^\s*(\d{2,4}[A-Z]?\s+[A-Z]{2}[\w\s\-]*?)$",
+        txt, re.MULTILINE
+    )
+    state_lines = [clean(s) for s in state_lines if len(clean(s)) > 3][:4]
+    rec["State Tax 1"] = state_lines[0] if len(state_lines) > 0 else ""
+    rec["State Tax 2"] = state_lines[1] if len(state_lines) > 1 else ""
+    rec["State Tax 3"] = state_lines[2] if len(state_lines) > 2 else ""
+    rec["State Tax 4"] = state_lines[3] if len(state_lines) > 3 else ""
 
-    # Individual state fields
-    rec["State Code 1"] = state_lines[0].strip() if len(state_lines) > 0 else ""
-    rec["State Code 2"] = state_lines[1].strip() if len(state_lines) > 1 else ""
-    rec["State Code 3"] = state_lines[2].strip() if len(state_lines) > 2 else ""
+    # ── SCHEDULED AMOUNTS ────────────────────────────────────────────────────
+    rec["401K"]      = mgrep([r"K\s*401K\s+([\d,\.]+)", r"401K\s+([\d,\.]+)"], txt)
+    rec["Pre-Med"]   = mgrep([r"35\s*PREMED\s+([\d,\.]+)", r"PREMED\s+([\d,\.]+)"], txt)
+    rec["ADDLCH"]    = mgrep([r"42\s*ADDLCH\s+([\d,\.]+)", r"ADDLCH\s+([\d,\.]+)"], txt)
+    rec["AD&D"]      = mgrep([r"57\s*AD&?D\s+([\d,\.]+)", r"AD&?D\s+([\d,\.]+)"], txt)
+    rec["HSA"]       = mgrep([r"HSA\s+HCCACT\s+([\d,\.]+)", r"HSA\s+([\d,\.]+)"], txt)
+    rec["Goal Limit"]    = grep(r"Limit:\s*([\d,\.]+)", txt)
+    rec["Goal To Date"]  = grep(r"To\s*Date:\s*([\d,\.]+)", txt)
 
-    rec["Location"]     = grep(r"([A-Z]{3,}\s+[A-Z])\s*$", tax_txt)  # e.g. "WARWICK T"
+    # ── DIRECT DEPOSIT ────────────────────────────────────────────────────────
+    rec["Acct #"]   = mgrep([
+        r"Acct\s*#\s*[:\-]?\s*([\dXx*\-]+)",
+        r"Account\s*#?\s*[:\-]?\s*([\dXx*\-]+)"
+    ], txt)
+    rec["Tran/ABA"] = grep(r"Tran/ABA:\s*([\d\s]+)", txt)
+    rec["DD Code"]  = grep(r"Code\s+([A-Z])\b", txt)
+    rec["DD Type"]  = mgrep([r"(Full\s+Deposit)", r"(Partial\s+Deposit)"], txt)
+
+    if DEBUG:
+        for k, v in rec.items():
+            if v:
+                print(f"  {k:22s}: {v}")
 
     return rec
 
-# ── process full PDF ──────────────────────────────────────────────────────────
+# ── read PDF and extract all employees ────────────────────────────────────────
 
 def extract_all(pdf_path, page_from=None, page_to=None):
     employees = []
 
     with pdfplumber.open(pdf_path) as pdf:
         total = len(pdf.pages)
-
-        # Resolve page range (1-based input -> 0-based index)
         p_from = max(1, page_from) if page_from else 1
         p_to   = min(total, page_to) if page_to else total
 
@@ -321,174 +309,157 @@ def extract_all(pdf_path, page_from=None, page_to=None):
             print(f"\n  ❌ Invalid page range {p_from}-{p_to} (PDF has {total} pages)")
             return []
 
-        page_indices = range(p_from - 1, p_to)   # convert to 0-based
-        page_count   = len(page_indices)
-
+        page_indices = range(p_from - 1, p_to)
         print(f"  Total pages in PDF : {total}")
         if page_from or page_to:
-            print(f"  Processing pages   : {p_from} to {p_to}  ({page_count} page(s))")
+            print(f"  Processing pages   : {p_from} to {p_to}  ({len(page_indices)} page(s))")
         else:
             print(f"  Processing pages   : all {total}")
 
-        with tqdm(total=page_count, desc="📄 Reading pages",
+        # Collect all text first
+        all_text = ""
+        with tqdm(total=len(page_indices), desc="📄 Reading pages",
                   unit="pg", colour="cyan", ncols=65) as pbar:
             for page_num in page_indices:
-                page   = pdf.pages[page_num]
-                bounds = find_employee_boundaries(page)
-
-                if DEBUG:
-                    print(f"\n══ PAGE {page_num+1} — {len(bounds)} employee(s) found ══")
-
-                if not bounds:
-                    if DEBUG:
-                        print(f"  Raw page text sample:")
-                        txt = page.extract_text() or ""
-                        print(txt[:600])
-                    pbar.update(1)
-                    continue
-
-                for y0, y1 in bounds:
-                    try:
-                        rec = parse_record(page, y0, y1, page_num + 1)
-                        if rec.get("Last Name") or rec.get("File #"):
-                            employees.append(rec)
-                    except Exception as e:
-                        tqdm.write(f"  ⚠️  Page {page_num+1} y={y0:.0f}: {e}")
+                page = pdf.pages[page_num]
+                t = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+                all_text += t + "\n"
                 pbar.update(1)
+
+    if not all_text.strip():
+        print("\n  ❌ No text found in PDF. File may be scanned (image-only).")
+        return []
+
+    if DEBUG:
+        print(f"\n  === FULL EXTRACTED TEXT (first 1000 chars) ===")
+        print(all_text[:1000])
+        print("  ===")
+
+    # Split into employee blocks
+    blocks = split_into_blocks(all_text)
+    print(f"  Employee blocks found: {len(blocks)}")
+
+    if not blocks:
+        print("\n  ⚠️  Could not detect employee blocks.")
+        print("  Run with --debug --pages 1-1 to see raw text.")
+        return []
+
+    # Parse each block
+    with tqdm(total=len(blocks), desc="👤 Parsing records",
+              unit="emp", colour="green", ncols=65) as pbar:
+        for i, block in enumerate(blocks):
+            try:
+                rec = parse_block(block)
+                rec["_block"] = i + 1
+                if rec.get("Last Name") or rec.get("File #"):
+                    employees.append(rec)
+                else:
+                    tqdm.write(f"  ⚠️  Block {i+1}: no name or file# — skipped")
+            except Exception as e:
+                tqdm.write(f"  ⚠️  Block {i+1} error: {e}")
+            pbar.update(1)
 
     return employees
 
-# ── Excel output ──────────────────────────────────────────────────────────────
+# ── Excel writer ──────────────────────────────────────────────────────────────
 
 COLUMNS = [
-    # Name
-    "Last Name", "First Name",
-    # Address
-    "Address", "City", "State", "Zip",
+    # Identity
+    "Last Name", "First Name", "Continued",
     # Personnel
-    "File #", "Dept", "Clock", "SSN", "Title",
-    "Status", "Sex", "Race", "Occup", "Set for Purge",
+    "File #", "Status", "Dept", "Sex", "Cntl", "Race",
+    "SSN", "Occup", "Title", "eVoucher",
+    "Cost", "Qualified Pension", "Health Coverage",
     # Dates
-    "Date 1", "Date 3", "Hire Date", "Birth Date", "Date 9",
+    "Hire Date", "Term Date", "Birth Date",
+    "Date 1", "Date 3", "Date 6", "Date 8", "Date 9",
+    # Address
+    "Address Line 1", "Address Line 2", "City", "State", "Zip", "City/State/Zip",
     # Pay
-    "Gross", "Salary", "Bi-Wkly", "Rate Calc", "LWW", "NWW",
+    "Gross", "Salary", "Bi-Wkly", "Rate Calc", "LWW", "NWW", "Std Hours", "Pay Group",
     # Tax
-    "Marital Status", "Federal Exemptions",
-    "State Code 1", "State Code 2", "State Code 3", "State Tax Lines",
-    "Location",
+    "Marital Status", "Federal Exemptions", "Federal Extra W/H",
+    "State Tax 1", "State Tax 2", "State Tax 3", "State Tax 4",
+    # Scheduled
+    "401K", "Pre-Med", "ADDLCH", "AD&D", "HSA", "Goal Limit", "Goal To Date",
+    # Direct Deposit
+    "Acct #", "Tran/ABA", "DD Code", "DD Type",
     # Meta
-    "_page",
+    "_block",
 ]
 
-# Color per section
 SEC_COLOR = {
-    "Last Name":"1F4E79","First Name":"1F4E79",
-    "Address":"1F3864","City":"1F3864","State":"1F3864","Zip":"1F3864",
-    "File #":"375623","Dept":"375623","Clock":"375623","SSN":"375623",
-    "Title":"375623","Status":"375623","Sex":"375623","Race":"375623",
-    "Occup":"375623","Set for Purge":"375623",
-    "Date 1":"7B2C2C","Date 3":"7B2C2C","Hire Date":"7B2C2C",
-    "Birth Date":"7B2C2C","Date 9":"7B2C2C",
+    "Last Name":"1F4E79","First Name":"1F4E79","Continued":"1F4E79",
+    "File #":"375623","Status":"375623","Dept":"375623","Sex":"375623",
+    "Cntl":"375623","Race":"375623","SSN":"375623","Occup":"375623",
+    "Title":"375623","eVoucher":"375623","Cost":"375623",
+    "Qualified Pension":"375623","Health Coverage":"375623",
+    "Hire Date":"7B2C2C","Term Date":"7B2C2C","Birth Date":"7B2C2C",
+    "Date 1":"7B2C2C","Date 3":"7B2C2C","Date 6":"7B2C2C",
+    "Date 8":"7B2C2C","Date 9":"7B2C2C",
+    "Address Line 1":"1F3864","Address Line 2":"1F3864","City":"1F3864",
+    "State":"1F3864","Zip":"1F3864","City/State/Zip":"1F3864",
     "Gross":"7B4A00","Salary":"7B4A00","Bi-Wkly":"7B4A00",
     "Rate Calc":"7B4A00","LWW":"7B4A00","NWW":"7B4A00",
+    "Std Hours":"7B4A00","Pay Group":"7B4A00",
     "Marital Status":"4A235A","Federal Exemptions":"4A235A",
-    "State Code 1":"4A235A","State Code 2":"4A235A","State Code 3":"4A235A",
-    "State Tax Lines":"4A235A","Location":"4A235A",
-    "_page":"555555",
+    "Federal Extra W/H":"4A235A","State Tax 1":"4A235A",
+    "State Tax 2":"4A235A","State Tax 3":"4A235A","State Tax 4":"4A235A",
+    "401K":"0D4C6E","Pre-Med":"0D4C6E","ADDLCH":"0D4C6E","AD&D":"0D4C6E",
+    "HSA":"0D4C6E","Goal Limit":"0D4C6E","Goal To Date":"0D4C6E",
+    "Acct #":"5C3317","Tran/ABA":"5C3317","DD Code":"5C3317","DD Type":"5C3317",
+    "_block":"555555",
 }
 
 SEC_LABELS = {
-    "Last Name":       "👤 Name",
-    "Address":         "📍 Address",
+    "Last Name":       "👤 Identity",
     "File #":          "🗂 Personnel",
-    "Date 1":          "📅 Dates",
+    "Hire Date":       "📅 Dates",
+    "Address Line 1":  "📍 Address",
     "Gross":           "💰 Pay",
-    "Marital Status":  "🧾 Tax Status",
-    "_page":           "ℹ Meta",
+    "Marital Status":  "🧾 Tax",
+    "401K":            "📊 Scheduled",
+    "Acct #":          "🏦 Direct Deposit",
+    "_block":          "ℹ Meta",
 }
 
 def write_excel(employees, out_path):
+    """Plain simple Excel — no colors, no merged cells, just headers + data."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "ADP Master Control"
 
-    BD  = Side(style="thin", color="BFBFBF")
-    BDR = Border(left=BD, right=BD, top=BD, bottom=BD)
-    NF  = Font(name="Arial", size=10)
-    AF  = PatternFill("solid", fgColor="EEF2F7")
-
-    # Row 1: Section group headers (merged cells)
-    current_label = None
-    span_start = 1
+    # Header row — plain bold
     for ci, col in enumerate(COLUMNS, 1):
-        lbl = SEC_LABELS.get(col)
-        if lbl and lbl != current_label:
-            if current_label is not None:
-                ws.merge_cells(start_row=1, start_column=span_start,
-                               end_row=1,   end_column=ci-1)
-                c = ws.cell(row=1, column=span_start, value=current_label)
-                color = SEC_COLOR.get(COLUMNS[span_start-1], "333333")
-                c.fill = PatternFill("solid", fgColor=color)
-                c.font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
-                c.alignment = Alignment(horizontal="center", vertical="center")
-                c.border = BDR
-            current_label = lbl
-            span_start = ci
-    # Last section
-    if current_label:
-        ws.merge_cells(start_row=1, start_column=span_start,
-                       end_row=1,   end_column=len(COLUMNS))
-        c = ws.cell(row=1, column=span_start, value=current_label)
-        color = SEC_COLOR.get(COLUMNS[span_start-1], "333333")
-        c.fill = PatternFill("solid", fgColor=color)
-        c.font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        c.border = BDR
-    ws.row_dimensions[1].height = 22
-
-    # Row 2: Column headers
-    for ci, col in enumerate(COLUMNS, 1):
-        c = ws.cell(row=2, column=ci, value=col)
-        c.fill = PatternFill("solid", fgColor=SEC_COLOR.get(col, "1F4E79"))
-        c.font = Font(bold=True, color="FFFFFF", name="Arial", size=9)
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = BDR
-    ws.row_dimensions[2].height = 28
+        c = ws.cell(row=1, column=ci, value=col)
+        c.font = Font(bold=True, name="Arial", size=10)
 
     # Data rows
     with tqdm(total=len(employees), desc="💾 Writing Excel",
               unit="row", colour="yellow", ncols=65) as pbar:
-        for ri, emp in enumerate(employees, 3):
-            fill = AF if ri % 2 == 0 else None
+        for ri, emp in enumerate(employees, 2):
             for ci, col in enumerate(COLUMNS, 1):
                 c = ws.cell(row=ri, column=ci, value=emp.get(col, ""))
-                c.font = NF; c.border = BDR
-                c.alignment = Alignment(vertical="center")
-                if fill: c.fill = fill
+                c.font = Font(name="Arial", size=10)
             pbar.update(1)
 
-    # Column widths
-    W = {"Last Name":16,"First Name":16,"Address":26,"City":16,"State":6,
-         "Zip":9,"File #":10,"Dept":9,"Clock":9,"SSN":14,"Title":12,
-         "Status":9,"Sex":5,"Race":7,"Occup":7,"Set for Purge":12,
-         "Date 1":11,"Date 3":11,"Hire Date":11,"Birth Date":11,"Date 9":11,
-         "Gross":11,"Salary":11,"Bi-Wkly":10,"Rate Calc":9,"LWW":7,"NWW":7,
-         "Marital Status":16,"Federal Exemptions":14,
-         "State Code 1":18,"State Code 2":18,"State Code 3":18,
-         "State Tax Lines":32,"Location":14,"_page":6}
+    # Auto-width based on content
     for ci, col in enumerate(COLUMNS, 1):
-        ws.column_dimensions[get_column_letter(ci)].width = W.get(col, 12)
+        max_len = len(col)
+        for ri in range(2, min(len(employees)+2, 52)):   # sample up to 50 rows
+            val = ws.cell(row=ri, column=ci).value or ""
+            max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[get_column_letter(ci)].width = min(max_len + 2, 40)
 
-    ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"A2:{get_column_letter(len(COLUMNS))}2"
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}1"
     wb.save(out_path)
-
 # ── main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if len(args) < 1:
         print(__doc__)
-        sys.exit(1)
+        sys.exit(0)
 
     pdf_path = args[0]
     out_path = args[1] if len(args) > 1 else \
@@ -498,32 +469,24 @@ if __name__ == "__main__":
         print(f"\n❌ File not found: {pdf_path}")
         sys.exit(1)
 
-    # Build flags summary for display
     flags = []
-    if PAGE_FROM or PAGE_TO:
-        flags.append(f"pages {PAGE_FROM}-{PAGE_TO}")
-    if DEBUG:
-        flags.append("DEBUG")
-    flags_str = "  " + " | ".join(flags) if flags else ""
+    if PAGE_FROM or PAGE_TO: flags.append(f"pages {PAGE_FROM}-{PAGE_TO}")
+    if DEBUG:                 flags.append("DEBUG")
 
     print(f"\n{'='*55}")
     print(f"  ADP Master Control Extractor")
     print(f"{'='*55}")
     print(f"  Input : {pdf_path}")
     print(f"  Output: {out_path}")
-    if flags_str:
-        print(f"  Flags :{flags_str}")
+    if flags: print(f"  Flags : {' | '.join(flags)}")
     print(f"{'='*55}")
 
     employees = extract_all(pdf_path, page_from=PAGE_FROM, page_to=PAGE_TO)
     print(f"\n  👥 Records found: {len(employees)}")
 
     if not employees:
-        print("\n  ❌ No records extracted.")
-        print("  Tips:")
-        print(f"    • Debug mode  : python extract_adp.py \"{pdf_path}\" --debug")
-        print(f"    • Single page : python extract_adp.py \"{pdf_path}\" --pages 1-1 --debug")
-        print(f"    • Check range : python extract_adp.py \"{pdf_path}\" --pages 1-3\n")
+        print("\n  ❌ No records extracted. Try:")
+        print(f"     python extract_adp.py \"{pdf_path}\" --pages 1-1 --debug\n")
         sys.exit(1)
 
     write_excel(employees, out_path)
