@@ -111,36 +111,39 @@ def parse_block(block, num=1):
     # ADDRESS - look for street address pattern (digits + words)
     # Address might be on separate lines or mixed with other fields
     addr_lines = []
-    for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+(?:ST|AVE|RD|DR|LN|BLVD|CT|CRESCT|CRECENT)?)", txt, re.MULTILINE | re.I):
+    for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+(?:ST|AVE|RD|DR|LN|BLVD|CT|CRESCT|CRECENT|DRIVE)?)", txt, re.MULTILINE | re.I):
         addr_lines.append(clean(m.group(1)))
     
-    # City, State, Zip pattern
-    for m in re.finditer(r"([A-Z\s]+?)\s+([A-Z]{2})\s+(\d{5})", txt):
-        city_state = m.group(0)
-        if not addr_lines:
-            addr_lines.append("")
-        if len(addr_lines) == 1:
-            addr_lines.append(city_state)
-        else:
-            addr_lines[1] = city_state
-        
-        rec["City"] = clean(m.group(1))
-        rec["State"] = m.group(2).upper()
-        rec["Zip"] = m.group(3)
-        break
+    # City, State, Zip pattern - look for: [optional codes] CITY STATE ZIP
+    # Remove codes like Q, Y, SS, etc that come before city
+    for m in re.finditer(r"(?:[A-Z][\s])*(?:Q|Y|SS)?\s*([A-Z]{2,}?)\s+([A-Z]{2})\s+(\d{5})", txt):
+        city_raw = m.group(1).strip()
+        # Filter: city must be real word (2+ chars, not just codes)
+        if len(city_raw) > 2 and city_raw not in ["SS", "YY", "QQ"]:
+            # Remove trailing code letters
+            city_clean = re.sub(r"\s+[A-Z]$", "", city_raw).strip()
+            if len(city_clean) > 2:
+                rec["City"] = clean(city_clean)
+                rec["State"] = m.group(2).upper()
+                rec["Zip"] = m.group(3)
+                break
     
     if addr_lines:
         rec["Address Line 1"] = addr_lines[0] if len(addr_lines) > 0 else ""
         rec["Address Line 2"] = addr_lines[1] if len(addr_lines) > 1 else ""
     
     # PAY - greedy to get full numbers even if mixed with other fields
-    # Gross: followed by numbers (may have spaces/separators)
-    gross_m = re.search(r"Gross:\s*([\d\s,\.]+?)(?=\s+(?:Federal|Salary|State|Form|Rate|Std|Dept|File|$))", txt, re.I)
-    rec["Gross"] = clean(gross_m.group(1)) if gross_m else ""
+    # Gross: followed by numbers (handle multiple Gross entries, take first meaningful one)
+    gross_matches = re.findall(r"Gross:\s*([\d\s,\.]+?)(?=\s+(?:Federal|Salary|State|Form|Rate|Std|Dept|File|Marital|Q\s|$))", txt, re.I)
+    if gross_matches:
+        # Take first match, clean up spaces
+        rec["Gross"] = clean(gross_matches[0]).replace(" ", "")
+    else:
+        rec["Gross"] = ""
     
     # Salary: followed by numbers
-    salary_m = re.search(r"Salary:\s*([\d\s,\.]+?)(?=\s+(?:Form|Rate|2020|Std|Dept|File|Monthly|$))", txt, re.I)
-    rec["Salary"] = clean(salary_m.group(1)) if salary_m else ""
+    salary_m = re.search(r"Salary:\s*([\d\s,\.]+?)(?=\s+(?:Federal|Form|Rate|2020|Std|Dept|File|Monthly|$))", txt, re.I)
+    rec["Salary"] = clean(salary_m.group(1)).replace(" ", "") if salary_m else ""
     
     rec["Rate Calc"] = grep(r"Rate\s+Calc:\s*(\S+)", txt)
     rec["Std Hours"] = grep(r"Std\s+Hours:\s*([\d\.]+)", txt)
