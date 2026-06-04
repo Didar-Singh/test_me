@@ -178,7 +178,7 @@ def extract_all(pdf_path, page_from=None, page_to=None):
         p_to = min(total, page_to) if page_to else total
         
         if p_from > total or p_from > p_to:
-            print(f"\n  ❌ Invalid pages {p_from}-{p_to} (PDF has {total})")
+            print(f"\n  [ERROR] Invalid pages {p_from}-{p_to} (PDF has {total})")
             return []
         
         all_text = ""
@@ -370,7 +370,7 @@ def process_single_file(pdf_path, out_path=None):
     print(f"{'='*55}")
     
     employees = extract_all(pdf_path, page_from=PAGE_FROM, page_to=PAGE_TO)
-    print(f"\n  👥 Records: {len(employees)}")
+    print(f"\n  [RECORDS] Count: {len(employees)}")
     
     if not employees:
         print("\n❌ No records extracted.")
@@ -378,7 +378,7 @@ def process_single_file(pdf_path, out_path=None):
     
     write_excel(employees, out_path, pdf_filename=Path(pdf_path).name)
     print(f"\n{'='*55}")
-    print(f"  ✅ Done! → {out_path}")
+    print(f"  [SUCCESS] Done! -> {out_path}")
     print(f"{'='*55}\n")
     return True
 
@@ -388,7 +388,7 @@ def process_folder(folder_path):
     pdf_files = sorted(folder.glob("*.pdf"))
     
     if not pdf_files:
-        print(f"❌ No PDF files in: {folder}")
+        print(f"[ERROR] No PDF files in: {folder}")
         return
     
     print(f"\n{'='*55}")
@@ -417,7 +417,7 @@ def process_folder(folder_path):
             failed += 1
     
     print(f"\n{'='*55}")
-    print(f"  ✅ Success: {success}  |  ❌ Failed: {failed}")
+    print(f"  [SUCCESS] {success}  |  [FAILED] {failed}")
     print(f"{'='*55}\n")
 
 # ── ENTRY POINT ────────────────────────────────────────────────────────────────
@@ -443,6 +443,6 @@ if __name__ == "__main__":
         sys.exit(0)
     
     else:
-        print(f"❌ Error: {target}")
+        print(f"[ERROR] Error: {target}")
         print(f"   Not a valid PDF file or folder")
         sys.exit(1)
