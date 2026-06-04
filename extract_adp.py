@@ -218,30 +218,127 @@ COLUMNS = [
     "_block",
 ]
 
-def write_excel(employees, out_path):
+STD_COLUMNS = [
+    "DOCID", "DOCID::Filename", "DOCID::File Extension",
+    "Last Name", "First Name", "Middle Name", "Suffix",
+    "Residential Address", "City", "Zip Code", "Country of Residence",
+    "State of Residence (if US)", "Province of Residence (if Canada)",
+    "Address Comments", "PI Notes",
+    "Government- Issued Identification", "Birth Information",
+    "Contact Information", "Financial Account Information",
+    "Access Credentials (Non-Financial Account)", "Health Related Information",
+    "Biometric Data", "Family Information", "Demographic Information",
+    "Work-Related Information",
+    "Full Date of Birth (MM/DD/YYYY)", "Passport Number", "Passport Country",
+    "Government-Issued ID Number", "Government ID Issuing Country",
+    "Driver's License Number", "DL Issuing Country",
+    "DL Issuing State (if US)", "DL Issuing Province (if Canada)",
+    "Social Security Number", "Tax Identification Number",
+    "Employee Identification Number", "Phone Number", "Email Address - Personal",
+]
+
+def _has_value(v):
+    s = str(v).strip().replace(",", "").replace(" ", "")
+    return bool(s) and s != "0"
+
+def build_std_row(emp, pdf_filename=""):
+    stem = Path(pdf_filename).stem if pdf_filename else ""
+    addr = emp.get("Address Line 1", "")
+    addr2 = emp.get("Address Line 2", "")
+    if addr and addr2:
+        addr = addr + ", " + addr2
+
+    gross_or_salary = _has_value(emp.get("Gross", "")) or _has_value(emp.get("Salary", ""))
+
+    return {
+        "DOCID": stem,
+        "DOCID::Filename": pdf_filename,
+        "DOCID::File Extension": ".pdf" if pdf_filename else "",
+        "Last Name": emp.get("Last Name", ""),
+        "First Name": emp.get("First Name", ""),
+        "Middle Name": "",
+        "Suffix": "",
+        "Residential Address": addr,
+        "City": emp.get("City", ""),
+        "Zip Code": emp.get("Zip", ""),
+        "Country of Residence": "",
+        "State of Residence (if US)": emp.get("State", ""),
+        "Province of Residence (if Canada)": "",
+        "Address Comments": "",
+        "PI Notes": "",
+        "Government- Issued Identification": True if emp.get("SSN", "") else "",
+        "Birth Information": True if emp.get("Birth Date", "") else "",
+        "Contact Information": "",
+        "Financial Account Information": True if emp.get("Acct #", "") else "",
+        "Access Credentials (Non-Financial Account)": "",
+        "Health Related Information": "",
+        "Biometric Data": "",
+        "Family Information": "",
+        "Demographic Information": "",
+        "Work-Related Information": True if gross_or_salary else "",
+        "Full Date of Birth (MM/DD/YYYY)": emp.get("Birth Date", ""),
+        "Passport Number": "",
+        "Passport Country": "",
+        "Government-Issued ID Number": "",
+        "Government ID Issuing Country": "",
+        "Driver's License Number": "",
+        "DL Issuing Country": "",
+        "DL Issuing State (if US)": "",
+        "DL Issuing Province (if Canada)": "",
+        "Social Security Number": emp.get("SSN", ""),
+        "Tax Identification Number": "",
+        "Employee Identification Number": emp.get("File #", ""),
+        "Phone Number": "",
+        "Email Address - Personal": "",
+    }
+
+def write_excel(employees, out_path, pdf_filename=""):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "ADP Master Control"
-    
+
     for ci, col in enumerate(COLUMNS, 1):
         c = ws.cell(row=1, column=ci, value=col)
         c.font = Font(bold=True, name="Arial", size=10)
-    
+
     with tqdm(total=len(employees), desc="💾 Excel", unit="row", colour="yellow", ncols=65) as pbar:
         for ri, emp in enumerate(employees, 2):
             for ci, col in enumerate(COLUMNS, 1):
                 ws.cell(row=ri, column=ci, value=emp.get(col, ""))
             pbar.update(1)
-    
+
     for ci, col in enumerate(COLUMNS, 1):
         max_len = len(col)
         for ri in range(2, min(len(employees)+2, 52)):
             val = ws.cell(row=ri, column=ci).value or ""
             max_len = max(max_len, len(str(val)))
         ws.column_dimensions[get_column_letter(ci)].width = min(max_len + 2, 50)
-    
+
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}1"
+
+    # ── Standardized_Data sheet ────────────────────────────────────────────────
+    ws2 = wb.create_sheet("Standardized_Data")
+
+    for ci, col in enumerate(STD_COLUMNS, 1):
+        c = ws2.cell(row=1, column=ci, value=col)
+        c.font = Font(bold=True, name="Arial", size=10)
+
+    for ri, emp in enumerate(employees, 2):
+        row_data = build_std_row(emp, pdf_filename)
+        for ci, col in enumerate(STD_COLUMNS, 1):
+            ws2.cell(row=ri, column=ci, value=row_data.get(col, ""))
+
+    for ci, col in enumerate(STD_COLUMNS, 1):
+        max_len = len(col)
+        for ri in range(2, min(len(employees)+2, 52)):
+            val = ws2.cell(row=ri, column=ci).value
+            if val is not None and val != "":
+                max_len = max(max_len, len(str(val)))
+        ws2.column_dimensions[get_column_letter(ci)].width = min(max_len + 2, 50)
+
+    ws2.freeze_panes = "A2"
+
     wb.save(out_path)
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
@@ -265,7 +362,7 @@ def process_single_file(pdf_path, out_path=None):
         print("\n❌ No records extracted.")
         return False
     
-    write_excel(employees, out_path)
+    write_excel(employees, out_path, pdf_filename=Path(pdf_path).name)
     print(f"\n{'='*55}")
     print(f"  ✅ Done! → {out_path}")
     print(f"{'='*55}\n")
@@ -298,7 +395,7 @@ def process_folder(folder_path):
                 tqdm.write(f"  ⚠️  {pdf_file.name}: No records")
                 failed += 1
                 continue
-            write_excel(employees, str(out_file))
+            write_excel(employees, str(out_file), pdf_filename=pdf_file.name)
             tqdm.write(f"  ✅ {pdf_file.name} ({len(employees)} records)")
             success += 1
         except Exception as e:
