@@ -1,18 +1,21 @@
 """
-ADP Master Control - Extract from MESSY LINEAR TEXT
-Handles text where all fields are jumbled on single lines.
+ADP Master Control - Extractor
+===============================
+Single file OR batch mode - auto-detects!
 
 Usage:
-  python extract_adp.py file.pdf
-  python extract_adp.py file.pdf output.xlsx
-  python extract_adp.py file.pdf output.xlsx --pages 1-5
+  python extract_adp.py file.pdf                    (single file)
+  python extract_adp.py file.pdf output.xlsx        (single + custom output)
+  python extract_adp.py C:\path\to\folder           (batch mode - all PDFs)
+  python extract_adp.py file.pdf --pages 1-5        (single + page range)
+  python extract_adp.py file.pdf --debug            (debug mode)
 """
-import re, sys
+import re, sys, os
+from pathlib import Path
 import pdfplumber
 import openpyxl
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-from pathlib import Path
 from tqdm import tqdm
 
 DEBUG = "--debug" in sys.argv
@@ -33,6 +36,8 @@ for i, arg in enumerate(sys.argv):
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+
 def clean(s):
     return " ".join(str(s).split()).strip() if s else ""
 
@@ -46,11 +51,11 @@ def mgrep(patterns, text, default=""):
         if v: return v
     return default
 
-# Find ALL employee names in full text
+# ── NAME FINDER ────────────────────────────────────────────────────────────────
+
 def find_all_names(text):
-    """Find ALL names: LAST,FIRST format - any position"""
+    """Find ALL names: LAST,FIRST format"""
     positions = []
-    # Much simpler: just find LAST,FIRST pattern anywhere
     for m in re.finditer(r"([A-Z][A-Z\'\-\.]+),([A-Z][A-Z\'\-\.\s]+?)(?=\s|$)", text):
         positions.append((m.start(), m.group(0)))
     return sorted(set(positions))
@@ -69,28 +74,24 @@ def split_by_names(text):
     
     if DEBUG:
         print(f"\n[FOUND {len(blocks)} EMPLOYEE BLOCKS]")
-        for i, b in enumerate(blocks):
-            print(f"  Block {i+1}: {b[:60]}...")
     
     return blocks
+
+# ── PARSE EMPLOYEE ─────────────────────────────────────────────────────────────
 
 def parse_block(block, num=1):
     """Parse messy single-line format"""
     rec = {"_block": num}
     txt = block
     
-    # NAME - just find LAST,FIRST (with optional middle) - capture until File: or other field
+    # NAME - capture full first name including middle initials
     name_m = re.search(r"([A-Z][A-Z\'\-\.]+),([A-Z][A-Z\'\-\.\s]+?)(?=\s+File:|\s+Marital|\s+Gross:|\s+Mailing|$)", txt, re.I)
     if name_m:
         rec["Last Name"] = clean(name_m.group(1))
-        rec["First Name"] = clean(name_m.group(2))  # This now includes middle initials/names
+        rec["First Name"] = clean(name_m.group(2))
     
     rec["Continued"] = "Yes" if "(continued)" in txt else ""
-    
-    # FILE # (first occurrence)
     rec["File #"] = grep(r"File:\s*(\d+)", txt)
-    
-    # Status, Dept, Sex, etc. - all on mixed lines
     rec["Status"] = mgrep([r"Status:\s*(\w+)", r"Status\s+(\w+)"], txt)
     rec["Dept"] = grep(r"Dept:\s*(\S+)", txt)
     rec["Sex"] = grep(r"Sex:\s*(\w)", txt)
@@ -100,7 +101,7 @@ def parse_block(block, num=1):
     rec["SSN"] = grep(r"SSN:\s*([^\n]+?)(?=\s{2,}|GTL|Title|$)", txt)
     rec["Title"] = grep(r"Title:\s*(\S+)", txt)
     
-    # DATES - all mixed in
+    # DATES
     rec["Hire Date"] = grep(r"Hire:\s*([\d/]+)", txt)
     rec["Term Date"] = grep(r"Term:\s*([\d/]+)", txt)
     rec["Birth Date"] = grep(r"Birth:\s*([\d/]+)", txt)
@@ -108,19 +109,14 @@ def parse_block(block, num=1):
     rec["Date 8"] = grep(r"Date\s+8:\s*([\d/]+)", txt)
     rec["Date 9"] = grep(r"Date\s+9:\s*([\d/]+)", txt)
     
-    # ADDRESS - look for street address pattern (digits + words)
-    # Address might be on separate lines or mixed with other fields
+    # ADDRESS
     addr_lines = []
     for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+(?:ST|AVE|RD|DR|LN|BLVD|CT|CRESCT|CRECENT|DRIVE)?)", txt, re.MULTILINE | re.I):
         addr_lines.append(clean(m.group(1)))
     
-    # City, State, Zip pattern - look for: [optional codes] CITY STATE ZIP
-    # Remove codes like Q, Y, SS, etc that come before city
     for m in re.finditer(r"(?:[A-Z][\s])*(?:Q|Y|SS)?\s*([A-Z]{2,}?)\s+([A-Z]{2})\s+(\d{5})", txt):
         city_raw = m.group(1).strip()
-        # Filter: city must be real word (2+ chars, not just codes)
         if len(city_raw) > 2 and city_raw not in ["SS", "YY", "QQ"]:
-            # Remove trailing code letters
             city_clean = re.sub(r"\s+[A-Z]$", "", city_raw).strip()
             if len(city_clean) > 2:
                 rec["City"] = clean(city_clean)
@@ -132,16 +128,13 @@ def parse_block(block, num=1):
         rec["Address Line 1"] = addr_lines[0] if len(addr_lines) > 0 else ""
         rec["Address Line 2"] = addr_lines[1] if len(addr_lines) > 1 else ""
     
-    # PAY - greedy to get full numbers even if mixed with other fields
-    # Gross: followed by numbers (handle multiple Gross entries, take first meaningful one)
+    # PAY
     gross_matches = re.findall(r"Gross:\s*([\d\s,\.]+?)(?=\s+(?:Federal|Salary|State|Form|Rate|Std|Dept|File|Marital|Q\s|$))", txt, re.I)
     if gross_matches:
-        # Take first match, clean up spaces
         rec["Gross"] = clean(gross_matches[0]).replace(" ", "")
     else:
         rec["Gross"] = ""
     
-    # Salary: followed by numbers
     salary_m = re.search(r"Salary:\s*([\d\s,\.]+?)(?=\s+(?:Federal|Form|Rate|2020|Std|Dept|File|Monthly|$))", txt, re.I)
     rec["Salary"] = clean(salary_m.group(1)).replace(" ", "") if salary_m else ""
     
@@ -151,36 +144,24 @@ def parse_block(block, num=1):
     
     # TAX
     rec["Marital Status"] = grep(r"(J?-?Married|Single)", txt)
-    rec["Federal Exemptions"] = mgrep([
-        r"Exemptions[^0-9]*(\d+)",
-        r"(\d+)\s+Exemptions",
-    ], txt)
+    rec["Federal Exemptions"] = mgrep([r"Exemptions[^0-9]*(\d+)", r"(\d+)\s+Exemptions"], txt)
     
-    # STATE TAX - extract state codes
     state_m = re.search(r"([\d]{2}\s+[A-Z]{2}(?:\s+[A-Z\s]+)?)", txt)
     if state_m:
         rec["State Tax"] = clean(state_m.group(1))
     
-    # DEDUCTIONS
     rec["GTL Cov"] = grep(r"GTL\s+Cov[^0-9]*?([\d\s]+)", txt)
     rec["401K"] = grep(r"401K\s+([\d,\.]+)", txt)
     
-    # DIRECT DEPOSIT - extract all
-    rec["Acct #"] = mgrep([
-        r"Acct\s*#\s*[:\-]?\s*([\dXx*\-]+)",
-        r"Acct:\s*([\dXx*\-]+)",
-    ], txt)
+    # DIRECT DEPOSIT
+    rec["Acct #"] = mgrep([r"Acct\s*#\s*[:\-]?\s*([\dXx*\-]+)", r"Acct:\s*([\dXx*\-]+)"], txt)
     rec["Tran/ABA"] = grep(r"Tran[/\\]ABA:\s*([\d\s]+)", txt)
     rec["DD Code"] = grep(r"Code\s+([A-Z])\b", txt)
     rec["DD Type"] = grep(r"(Full|Partial)\s+Deposit", txt)
     
-    if DEBUG:
-        print(f"\nBLOCK {num}:")
-        for k, v in rec.items():
-            if v and not k.startswith("_"):
-                print(f"  {k:20s}: {v}")
-    
     return rec
+
+# ── EXTRACT FROM PDF ───────────────────────────────────────────────────────────
 
 def extract_all(pdf_path, page_from=None, page_to=None):
     employees = []
@@ -194,9 +175,6 @@ def extract_all(pdf_path, page_from=None, page_to=None):
             print(f"\n  ❌ Invalid pages {p_from}-{p_to} (PDF has {total})")
             return []
         
-        print(f"  PDF pages: {total}")
-        print(f"  Processing: {p_from} to {p_to}")
-        
         all_text = ""
         with tqdm(total=p_to-p_from+1, desc="📄 Reading", unit="pg", colour="cyan", ncols=65) as pbar:
             for page_num in range(p_from-1, p_to):
@@ -206,11 +184,9 @@ def extract_all(pdf_path, page_from=None, page_to=None):
                 pbar.update(1)
         
         if not all_text.strip():
-            print("\n  ❌ No text found")
             return []
         
         blocks = split_by_names(all_text)
-        print(f"  Employees found: {len(blocks)}")
         
         if not blocks:
             return []
@@ -227,6 +203,8 @@ def extract_all(pdf_path, page_from=None, page_to=None):
     
     return employees
 
+# ── EXCEL WRITER ───────────────────────────────────────────────────────────────
+
 COLUMNS = [
     "Last Name", "First Name", "Continued",
     "File #", "Status", "Dept", "Sex", "Cntl", "Race", "Occup", "SSN", "Title",
@@ -234,8 +212,7 @@ COLUMNS = [
     "Address Line 1", "Address Line 2", "City", "State", "Zip",
     "Gross", "Salary", "Rate Calc", "Std Hours", "Pay Group",
     "Marital Status", "Federal Exemptions", "State Tax",
-    "GTL Cov", "401K",
-    "Acct #", "Tran/ABA", "DD Code", "DD Type",
+    "GTL Cov", "401K", "Acct #", "Tran/ABA", "DD Code", "DD Type",
     "_block",
 ]
 
@@ -265,40 +242,94 @@ def write_excel(employees, out_path):
     ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}1"
     wb.save(out_path)
 
-if __name__ == "__main__":
-    if len(args) < 1:
-        print(__doc__)
-        sys.exit(0)
-    
-    pdf_path = args[0]
-    out_path = args[1] if len(args) > 1 else str(Path(pdf_path).stem + "_employees.xlsx")
-    
-    if not Path(pdf_path).exists():
-        print(f"\n❌ File not found: {pdf_path}\n")
-        sys.exit(1)
-    
-    flags = []
-    if PAGE_FROM or PAGE_TO: flags.append(f"pages {PAGE_FROM}-{PAGE_TO}")
-    if DEBUG: flags.append("DEBUG")
+# ── MAIN ───────────────────────────────────────────────────────────────────────
+
+def process_single_file(pdf_path, out_path=None):
+    """Process ONE PDF file"""
+    if not out_path:
+        out_path = str(Path(pdf_path).stem + "_employees.xlsx")
     
     print(f"\n{'='*55}")
     print(f"  ADP Master Control Extractor")
     print(f"{'='*55}")
     print(f"  Input : {pdf_path}")
     print(f"  Output: {out_path}")
-    if flags: print(f"  Flags : {' | '.join(flags)}")
     print(f"{'='*55}")
     
     employees = extract_all(pdf_path, page_from=PAGE_FROM, page_to=PAGE_TO)
     print(f"\n  👥 Records: {len(employees)}")
     
     if not employees:
-        print("\n❌ No records. Try debug mode:")
-        print(f"   python extract_adp.py \"{pdf_path}\" --debug\n")
-        sys.exit(1)
+        print("\n❌ No records extracted.")
+        return False
     
     write_excel(employees, out_path)
-    
     print(f"\n{'='*55}")
     print(f"  ✅ Done! → {out_path}")
     print(f"{'='*55}\n")
+    return True
+
+def process_folder(folder_path):
+    """Process ALL PDFs in FOLDER"""
+    folder = Path(folder_path)
+    pdf_files = sorted(folder.glob("*.pdf"))
+    
+    if not pdf_files:
+        print(f"❌ No PDF files in: {folder}")
+        return
+    
+    print(f"\n{'='*55}")
+    print(f"  ADP Batch Extractor")
+    print(f"{'='*55}")
+    print(f"  Folder: {folder.absolute()}")
+    print(f"  Files : {len(pdf_files)} PDF(s)")
+    print(f"{'='*55}\n")
+    
+    success = 0
+    failed = 0
+    
+    for pdf_file in tqdm(pdf_files, desc="Processing", unit="file", colour="cyan", ncols=70):
+        out_file = pdf_file.parent / f"{pdf_file.stem}_employees.xlsx"
+        try:
+            employees = extract_all(str(pdf_file))
+            if not employees:
+                tqdm.write(f"  ⚠️  {pdf_file.name}: No records")
+                failed += 1
+                continue
+            write_excel(employees, str(out_file))
+            tqdm.write(f"  ✅ {pdf_file.name} ({len(employees)} records)")
+            success += 1
+        except Exception as e:
+            tqdm.write(f"  ❌ {pdf_file.name}: {e}")
+            failed += 1
+    
+    print(f"\n{'='*55}")
+    print(f"  ✅ Success: {success}  |  ❌ Failed: {failed}")
+    print(f"{'='*55}\n")
+
+# ── ENTRY POINT ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    if len(args) < 1:
+        print(__doc__)
+        sys.exit(0)
+    
+    target = args[0]
+    target_path = Path(target)
+    
+    # Auto-detect: FILE or FOLDER?
+    if target_path.is_file() and target_path.suffix.lower() == ".pdf":
+        # Single PDF file
+        out_path = args[1] if len(args) > 1 and not args[1].startswith("--") else None
+        success = process_single_file(str(target_path), out_path)
+        sys.exit(0 if success else 1)
+    
+    elif target_path.is_dir():
+        # Folder - batch mode
+        process_folder(target_path)
+        sys.exit(0)
+    
+    else:
+        print(f"❌ Error: {target}")
+        print(f"   Not a valid PDF file or folder")
+        sys.exit(1)
