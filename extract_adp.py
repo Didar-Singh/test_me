@@ -9,6 +9,10 @@ Usage:
   python extract_adp.py C:\path\to\folder           (batch mode - all PDFs)
   python extract_adp.py file.pdf --pages 1-5        (single + page range)
   python extract_adp.py file.pdf --debug            (debug mode)
+
+Debug Examples:
+  python extract_adp.py file.pdf --pages 1-10 --debug     (debug first 10 pages)
+  python extract_adp.py file.pdf --debug > debug.txt 2>&1 (save debug output to file)
 """
 import re, sys, os
 from pathlib import Path
