@@ -119,7 +119,14 @@ def parse_block(block, num=1):
         street = clean(m.group(1))
         if street and not re.search(r"(Monthly|Exemptions|Federal|Form)$", street, re.I):
             addr_lines.append(street)
-    
+
+    if DEBUG and num <= 5:
+        print(f"\n[DEBUG BLOCK {num}] {rec.get('Last Name', '?')}, {rec.get('First Name', '?')}")
+        print(f"  Raw text (first 300 chars): {txt[:300]}")
+        print(f"  Street lines found: {len(addr_lines)}")
+        for i, addr in enumerate(addr_lines):
+            print(f"    [{i+1}] {addr}")
+
     for m in re.finditer(r"(?:[A-Z][\s])*(?:Q|Y|SS)?\s*([A-Z]{2,}?)\s+([A-Z]{2})\s+(\d{5})", txt):
         city_raw = m.group(1).strip()
         if len(city_raw) > 2 and city_raw not in ["SS", "YY", "QQ"]:
@@ -128,8 +135,13 @@ def parse_block(block, num=1):
                 rec["City"] = clean(city_clean)
                 rec["State"] = m.group(2).upper()
                 rec["Zip"] = m.group(3)
+                if DEBUG and num <= 5:
+                    print(f"  City/State/Zip: {rec['City']}, {rec['State']} {rec['Zip']}")
                 break
-    
+
+    if DEBUG and num <= 5 and "City" not in rec:
+        print(f"  NO City/State/Zip found")
+
     if addr_lines:
         rec["Address Line 1"] = addr_lines[0] if len(addr_lines) > 0 else ""
         rec["Address Line 2"] = addr_lines[1] if len(addr_lines) > 1 else ""
