@@ -241,6 +241,14 @@ def _has_value(v):
     s = str(v).strip().replace(",", "").replace(" ", "")
     return bool(s) and s != "0"
 
+def _validate_ssn(ssn):
+    if not ssn:
+        return ""
+    s = str(ssn).strip()
+    if re.match(r"^\d{3}-\d{2}-\d{4}$", s) or re.match(r"^\d{9}$", s):
+        return s
+    return ""
+
 def build_std_row(emp, pdf_filename=""):
     stem = Path(pdf_filename).stem if pdf_filename else ""
     addr = emp.get("Address Line 1", "")
@@ -249,6 +257,8 @@ def build_std_row(emp, pdf_filename=""):
         addr = addr + ", " + addr2
 
     gross_or_salary = _has_value(emp.get("Gross", "")) or _has_value(emp.get("Salary", ""))
+
+    valid_ssn = _validate_ssn(emp.get("SSN", ""))
 
     return {
         "DOCID": stem,
@@ -266,7 +276,7 @@ def build_std_row(emp, pdf_filename=""):
         "Province of Residence (if Canada)": "",
         "Address Comments": "",
         "PI Notes": "",
-        "Government- Issued Identification": True if emp.get("SSN", "") else "",
+        "Government- Issued Identification": True if valid_ssn else "",
         "Birth Information": True if emp.get("Birth Date", "") else "",
         "Contact Information": "",
         "Financial Account Information": True if emp.get("Acct #", "") else "",
@@ -285,7 +295,7 @@ def build_std_row(emp, pdf_filename=""):
         "DL Issuing Country": "",
         "DL Issuing State (if US)": "",
         "DL Issuing Province (if Canada)": "",
-        "Social Security Number": emp.get("SSN", ""),
+        "Social Security Number": valid_ssn,
         "Tax Identification Number": "",
         "Employee Identification Number": emp.get("File #", ""),
         "Phone Number": "",
