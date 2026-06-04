@@ -79,11 +79,11 @@ def parse_block(block, num=1):
     rec = {"_block": num}
     txt = block
     
-    # NAME - just find LAST,FIRST anywhere in first 200 chars (should be near start)
-    name_m = re.search(r"([A-Z][A-Z\'\-\.]+),([A-Z][A-Z\'\-\.\s]+?)(?=\s|$)", txt)
+    # NAME - just find LAST,FIRST (with optional middle) - capture until File: or other field
+    name_m = re.search(r"([A-Z][A-Z\'\-\.]+),([A-Z][A-Z\'\-\.\s]+?)(?=\s+File:|\s+Marital|\s+Gross:|\s+Mailing|$)", txt, re.I)
     if name_m:
         rec["Last Name"] = clean(name_m.group(1))
-        rec["First Name"] = clean(name_m.group(2))
+        rec["First Name"] = clean(name_m.group(2))  # This now includes middle initials/names
     
     rec["Continued"] = "Yes" if "(continued)" in txt else ""
     
