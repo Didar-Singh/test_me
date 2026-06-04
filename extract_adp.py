@@ -25,11 +25,20 @@ from tqdm import tqdm
 DEBUG = "--debug" in sys.argv
 PAGE_FROM = PAGE_TO = None
 
-for arg in sys.argv[1:]:
-    m = re.match(r"--pages[=:]?(\d+)[-:](\d+)$", arg)
-    if m:
-        PAGE_FROM, PAGE_TO = int(m.group(1)), int(m.group(2))
-        break
+# Parse --pages flag - handle: --pages 17-25, --pages=17-25, --pages 17 25
+for i, arg in enumerate(sys.argv):
+    if "--pages" in arg:
+        if "=" in arg:
+            val = arg.split("=")[1]
+        elif i + 1 < len(sys.argv):
+            val = sys.argv[i + 1]
+        else:
+            val = ""
+        
+        m = re.match(r"(\d+)[-\s:](\d+)", val)
+        if m:
+            PAGE_FROM, PAGE_TO = int(m.group(1)), int(m.group(2))
+            break
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 
