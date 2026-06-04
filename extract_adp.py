@@ -109,10 +109,12 @@ def parse_block(block, num=1):
     rec["Date 8"] = grep(r"Date\s+8:\s*([\d/]+)", txt)
     rec["Date 9"] = grep(r"Date\s+9:\s*([\d/]+)", txt)
     
-    # ADDRESS
+    # ADDRESS - stop at pipes, Monthly, Exemptions, etc
     addr_lines = []
-    for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+(?:ST|AVE|RD|DR|LN|BLVD|CT|CRESCT|CRECENT|DRIVE)?)", txt, re.MULTILINE | re.I):
-        addr_lines.append(clean(m.group(1)))
+    for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+?)(?=\s*\||Monthly|Exemptions|Federal|Form|Rate|$)", txt, re.MULTILINE | re.I):
+        street = clean(m.group(1))
+        if street and not re.search(r"(Monthly|Exemptions|Federal|Form)$", street, re.I):
+            addr_lines.append(street)
     
     for m in re.finditer(r"(?:[A-Z][\s])*(?:Q|Y|SS)?\s*([A-Z]{2,}?)\s+([A-Z]{2})\s+(\d{5})", txt):
         city_raw = m.group(1).strip()
