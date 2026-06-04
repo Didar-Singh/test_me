@@ -28,12 +28,14 @@ pytesseract.pytesseract.tesseract_cmd = (
 
 DPI = 300
 
-# Matches "Some Label : value" — value must be non-empty to avoid false positives
+# Matches "Label : value"  (value must be non-empty)
 FIELD_RE = re.compile(r'^([A-Za-z][A-Za-z0-9 /_()-]{0,50}?)\s*:\s*(.+)$')
+# Matches "Label :"  with NO value — orphan label from two-column form layouts
+ORPHAN_RE = re.compile(r'^([A-Za-z][A-Za-z0-9 /_()-]{0,50}?)\s*:\s*$')
 
 
 def merge_broken_fields(lines: list[str]) -> list[str]:
-    """Merge lines where OCR split a label name across two lines (next line starts with ':')."""
+    """Merge lines where OCR split a label across two lines (next line starts with ':')."""
     merged = []
     i = 0
     while i < len(lines):
@@ -52,8 +54,62 @@ def merge_broken_fields(lines: list[str]) -> list[str]:
     return merged
 
 
+def pair_columns(lines: list[str]) -> list[str]:
+    """
+    Fix two-column form layouts where Tesseract reads all labels first, then all values:
+
+        Name     :          →  Name     : John Doe
+        SSN      :          →  SSN      : 123-45-6789
+        Address  :          →  Address  : 123 Main St
+        John Doe
+        123-45-6789
+        123 Main St
+
+    Detects a run of ≥2 consecutive orphan labels, then pairs them with the
+    same number of plain-text lines that follow.
+    """
+    result = []
+    i = 0
+    while i < len(lines):
+        # Collect consecutive orphan-label lines
+        labels = []
+        j = i
+        while j < len(lines) and ORPHAN_RE.match(lines[j].strip()):
+            labels.append(ORPHAN_RE.match(lines[j].strip()).group(1).strip())
+            j += 1
+
+        if len(labels) >= 2:
+            # Skip blank lines between label block and value block
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            # Collect the next N non-field, non-blank lines as values
+            values = []
+            k = j
+            while k < len(lines) and len(values) < len(labels):
+                s = lines[k].strip()
+                if s and not ORPHAN_RE.match(s) and not FIELD_RE.match(s):
+                    values.append(s)
+                    k += 1
+                elif not s:
+                    k += 1  # allow stray blank lines between values
+                else:
+                    break
+
+            if len(values) == len(labels):
+                for key, val in zip(labels, values):
+                    result.append(f"{key} : {val}")
+                i = k
+                continue  # successfully paired — move past both blocks
+
+        # No pairing possible — pass the current line through unchanged
+        result.append(lines[i])
+        i += 1
+
+    return result
+
+
 def tag_lines(lines: list[str]) -> list[tuple]:
-    """Return (tag, original_line, key, value) for each line. tag = 'field'|'blank'|'text'."""
+    """Return (tag, original_line, key, value). tag = 'field' | 'blank' | 'text'."""
     tagged = []
     for line in lines:
         stripped = line.strip()
@@ -76,20 +132,22 @@ def remove_inter_field_blanks(tagged: list[tuple]) -> list[tuple]:
             prev_tag = next((t[0] for t in reversed(tagged[:i]) if t[0] != 'blank'), None)
             next_tag = next((t[0] for t in tagged[i + 1:] if t[0] != 'blank'), None)
             if prev_tag == 'field' and next_tag == 'field':
-                continue  # OCR-injected gap between fields — drop it
+                continue  # OCR-injected gap — drop it
         result.append(item)
     return result
 
 
 def process_all_pages(raw_pages: list[str]) -> list[str]:
     """
-    Process all OCR pages together so alignment is consistent across the document:
-    - Remove blank lines between consecutive field lines.
-    - Compute max key width from ALL pages, not per-page.
+    Process all pages together for document-wide consistent alignment:
+    1. Repair split labels and two-column form layouts.
+    2. Remove OCR-injected blank lines between field lines.
+    3. Align all fields to a single column width computed across all pages.
     """
     all_tagged = []
     for raw in raw_pages:
         lines = merge_broken_fields(raw.splitlines())
+        lines = pair_columns(lines)            # fix two-column layout
         tagged = tag_lines(lines)
         tagged = remove_inter_field_blanks(tagged)
         all_tagged.append(tagged)
