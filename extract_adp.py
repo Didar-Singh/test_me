@@ -113,12 +113,29 @@ def parse_block(block, num=1):
     rec["Date 8"] = grep(r"Date\s+8:\s*([\d/]+)", txt)
     rec["Date 9"] = grep(r"Date\s+9:\s*([\d/]+)", txt)
     
-    # ADDRESS - stop at pipes, Monthly, Exemptions, etc
+    # ADDRESS - look for "home & mailing address" section
     addr_lines = []
-    for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+?)(?=\s*\||Monthly|Exemptions|Federal|Form|Rate|$)", txt, re.MULTILINE | re.I):
-        street = clean(m.group(1))
-        if street and not re.search(r"(Monthly|Exemptions|Federal|Form)$", street, re.I):
+
+    # Pattern 1: Find "home & mailing address" marker, then capture next lines
+    addr_match = re.search(r"(?:home\s*&\s*mailing\s+address|residential\s+address|address)[^\n]*\n\s*([^\n]+?)(?:\n|$)", txt, re.MULTILINE | re.I)
+    if addr_match:
+        street = clean(addr_match.group(1))
+        if street and len(street) > 4:
             addr_lines.append(street)
+
+    # Pattern 2: Fallback - "Home:" or "Mailing:" followed by address on same line
+    if not addr_lines:
+        for m in re.finditer(r"(?:Home|Mailing|Residential)[\s:]*(\d*\s*[A-Z][A-Z\s\.\-#]+?)(?=\s*(?:Mailing|City|Monthly|Exemptions|Federal|Form|Rate|$))", txt, re.MULTILINE | re.I):
+            street = clean(m.group(1))
+            if street and len(street) > 4:
+                addr_lines.append(street)
+
+    # Pattern 3: Fallback - traditional "123 MAIN STREET" format
+    if not addr_lines:
+        for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+?)(?=\s*\||Monthly|Exemptions|Federal|Form|Rate|$)", txt, re.MULTILINE | re.I):
+            street = clean(m.group(1))
+            if street and not re.search(r"(Monthly|Exemptions|Federal|Form)$", street, re.I):
+                addr_lines.append(street)
 
     if DEBUG and num <= 5:
         print(f"\n[DEBUG BLOCK {num}] {rec.get('Last Name', '?')}, {rec.get('First Name', '?')}")
