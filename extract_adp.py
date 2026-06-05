@@ -21,6 +21,8 @@ import openpyxl
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 DEBUG = "--debug" in sys.argv
 PAGE_FROM = PAGE_TO = None
@@ -200,41 +202,59 @@ def parse_block(block, num=1):
 
 def extract_all(pdf_path, page_from=None, page_to=None):
     employees = []
-    
+
     with pdfplumber.open(pdf_path) as pdf:
         total = len(pdf.pages)
         p_from = max(1, page_from) if page_from else 1
         p_to = min(total, page_to) if page_to else total
-        
+
         if p_from > total or p_from > p_to:
             print(f"\n  [ERROR] Invalid pages {p_from}-{p_to} (PDF has {total})")
             return []
-        
+
+        # Read pages in parallel
+        def read_page(page_num):
+            page = pdf.pages[page_num]
+            return page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+
         all_text = ""
-        with tqdm(total=p_to-p_from+1, desc="📄 Reading", unit="pg", colour="cyan", ncols=65) as pbar:
-            for page_num in range(p_from-1, p_to):
-                page = pdf.pages[page_num]
-                t = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
-                all_text += t + "\n"
-                pbar.update(1)
-        
+        page_range = range(p_from-1, p_to)
+        with tqdm(total=len(page_range), desc="[READING]", unit="pg", colour="cyan", ncols=65) as pbar:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(read_page, pn): pn for pn in page_range}
+                for future in as_completed(futures):
+                    t = future.result()
+                    all_text += t + "\n"
+                    pbar.update(1)
+
         if not all_text.strip():
             return []
-        
+
         blocks = split_by_names(all_text)
-        
+
         if not blocks:
             return []
-        
-        with tqdm(total=len(blocks), desc="👤 Parsing", unit="emp", colour="green", ncols=65) as pbar:
-            for i, block in enumerate(blocks):
-                try:
-                    rec = parse_block(block, i+1)
-                    if rec.get("Last Name") or rec.get("File #"):
-                        employees.append(rec)
-                except Exception as e:
-                    tqdm.write(f"  ⚠️  Block {i+1}: {e}")
-                pbar.update(1)
+
+        # Parse blocks in parallel
+        def parse_and_filter(item):
+            i, block = item
+            try:
+                rec = parse_block(block, i+1)
+                if rec.get("Last Name") or rec.get("File #"):
+                    return rec
+            except Exception as e:
+                if DEBUG:
+                    print(f"  [WARNING] Block {i+1}: {e}")
+            return None
+
+        with tqdm(total=len(blocks), desc="[PARSING]", unit="emp", colour="green", ncols=65) as pbar:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(parse_and_filter, (i, block)): i for i, block in enumerate(blocks)}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        employees.append(result)
+                    pbar.update(1)
     
     return employees
 
