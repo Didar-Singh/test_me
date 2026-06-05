@@ -45,16 +45,14 @@ def extract_name(text):
     """Extract person's name from text"""
     lines = text.split('\n')
 
-    # Common patterns for names in earnings statements
-    for line in lines[:10]:  # Check first 10 lines
-        line = line.strip()
-        # Skip common header text
-        if any(skip in line.lower() for skip in ['earnings', 'statement', 'employee', 'pay', 'date', 'period']):
-            continue
-        # If line has 2-4 words and doesn't contain numbers or special chars
-        words = line.split()
-        if 2 <= len(words) <= 4 and not any(char.isdigit() for char in line):
-            return line
+    # Look for name after "e/f Employee's name, address, and zip code"
+    for i, line in enumerate(lines):
+        if "e/f" in line or "Employee's name" in line:
+            # Next non-empty line should be the name
+            for j in range(i + 1, min(i + 4, len(lines))):
+                candidate = lines[j].strip()
+                if candidate and not any(c.isdigit() for c in candidate) and len(candidate.split()) >= 2:
+                    return candidate
 
     return None
 
@@ -62,29 +60,45 @@ def extract_address(text):
     """Extract address from text"""
     lines = text.split('\n')
     address_lines = []
+    found_name = False
+    skip_next = False
 
-    # Look for address patterns after "Employee's name, address, and zip code"
-    capture = False
-    for line in lines:
-        line = line.strip()
-        if "Employee's name" in line or "employee's address" in line.lower():
-            capture = True
-            continue
-        if capture and line and not any(skip in line.lower() for skip in ['wage', 'tax', 'social', 'medicare']):
-            if len(address_lines) < 2 and line != "":
-                address_lines.append(line)
-            elif len(address_lines) >= 2:
+    # Find name first, then get address lines after it
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+
+        if "e/f" in line or "Employee's name" in line:
+            # Skip this header line and find the name in the next non-empty line
+            for j in range(i + 1, min(i + 4, len(lines))):
+                candidate = lines[j].strip()
+                if candidate and not any(c.isdigit() for c in candidate) and len(candidate.split()) >= 2:
+                    # Found name, now get next 2 address lines
+                    skip_next = True
+                    start_idx = j + 1
+                    break
+
+            if skip_next:
+                for k in range(start_idx, min(start_idx + 3, len(lines))):
+                    addr_line = lines[k].strip()
+                    if addr_line and not any(skip in addr_line.lower() for skip in ['wage', 'tax', 'social', 'medicare', 'employer', 'ein']):
+                        address_lines.append(addr_line)
+                        if len(address_lines) >= 2:
+                            break
                 break
 
     return ', '.join(address_lines) if address_lines else None
 
 def extract_gross_salary(text):
     """Extract gross salary/income from text"""
-    # Look for "1 Wages, tips, other compensation" pattern in W-2
+    # Look for "1 Wages, tips, other compensation" followed by amount
+    match = re.search(r'1\s+Wages[^$]*?\s+([\d,]+\.?\d*)', text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback patterns
     patterns = [
-        r'1\s+Wages[^0-9]*?([\d,]+\.\d{2})',
-        r'Wages[^0-9]*?([\d,]+\.\d{2})',
-        r'Gross[^0-9]*?([\d,]+\.\d{2})',
+        r'Wages[,\s]+[^$]*?\s+([\d,]+\.\d{2})',
+        r'Gross\s+[^$]*?\s+([\d,]+\.\d{2})',
     ]
 
     for pattern in patterns:
@@ -96,11 +110,15 @@ def extract_gross_salary(text):
 
 def extract_net_pay(text):
     """Extract net pay from text"""
-    # Look for "2 Federal income tax withheld" pattern in W-2
+    # Look for "2 Federal income tax withheld" followed by amount
+    match = re.search(r'2\s+Federal\s+income\s+tax[^$]*?\s+([\d,]+\.?\d*)', text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback patterns
     patterns = [
-        r'2\s+Federal\s+income\s+tax[^0-9]*?([\d,]+\.\d{2})',
-        r'Federal\s+income\s+tax[^0-9]*?([\d,]+\.\d{2})',
-        r'Net\s+Pay[^0-9]*?([\d,]+\.\d{2})',
+        r'Federal\s+income\s+tax[^$]*?\s+([\d,]+\.\d{2})',
+        r'Net\s+Pay[^$]*?\s+([\d,]+\.\d{2})',
     ]
 
     for pattern in patterns:

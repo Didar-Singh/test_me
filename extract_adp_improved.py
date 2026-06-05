@@ -1,0 +1,484 @@
+"""
+ADP Master Control - Improved Extractor
+========================================
+Enhanced name and earnings extraction with better pattern matching.
+
+Usage:
+  python extract_adp_improved.py file.pdf                    (single file)
+  python extract_adp_improved.py file.pdf output.xlsx        (single + custom output)
+  python extract_adp_improved.py C:\path\to\folder           (batch mode - all PDFs)
+  python extract_adp_improved.py file.pdf --debug            (debug mode)
+"""
+import re, sys, os
+from pathlib import Path
+import pdfplumber
+import openpyxl
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+DEBUG = "--debug" in sys.argv
+PAGE_FROM = PAGE_TO = None
+
+for i, arg in enumerate(sys.argv):
+    if "--pages" in arg:
+        if "=" in arg:
+            val = arg.split("=")[1]
+        elif i + 1 < len(sys.argv):
+            val = sys.argv[i + 1]
+        else:
+            val = ""
+        m = re.match(r"(\d+)[-\s:](\d+)", val)
+        if m:
+            PAGE_FROM, PAGE_TO = int(m.group(1)), int(m.group(2))
+            break
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+
+# ── HELPERS ────────────────────────────────────────────────────────────────
+
+def clean(s):
+    return " ".join(str(s).split()).strip() if s else ""
+
+def grep(pattern, text, group=1, default="", flags=re.IGNORECASE):
+    m = re.search(pattern, text, flags)
+    return clean(m.group(group)) if m else default
+
+def mgrep(patterns, text, default=""):
+    for p in (patterns if isinstance(patterns, list) else [patterns]):
+        v = grep(p, text, default="")
+        if v: return v
+    return default
+
+# ── IMPROVED NAME FINDER ───────────────────────────────────────────────────
+
+def find_all_names(text):
+    """Find ALL names in LAST,FIRST format - improved pattern"""
+    positions = []
+    # Simplified pattern: LAST,FIRST where both are capitalized words
+    # Removed strict lookahead to catch more names
+    for m in re.finditer(r"([A-Z][A-Z\'\-\.]+)\s*,\s*([A-Z][A-Z\'\-\.\s]+?)(?=\s{2,}|\d{2,}|File|Marital|Gross|SSN|Title|Hire|Birth|Status|Dept|Sex|Race|Occup|Salary|Federal|State|Rate|Pay|GTL|401|Acct|Tran|Code|$)", text, re.MULTILINE):
+        positions.append((m.start(), m.group(0)))
+
+    if DEBUG:
+        print(f"\n[NAME FINDER] Found {len(positions)} names")
+        for pos, name in positions[:5]:
+            print(f"  - {name}")
+
+    return sorted(set(positions))
+
+def split_by_names(text):
+    """Split text into blocks by employee names"""
+    names = find_all_names(text)
+    if not names:
+        return []
+
+    blocks = []
+    for i, (pos, name) in enumerate(names):
+        start = pos
+        end = names[i+1][0] if i+1 < len(names) else len(text)
+        blocks.append(text[start:end].strip())
+
+    if DEBUG:
+        print(f"\n[SPLIT] {len(blocks)} employee blocks created")
+
+    return blocks
+
+# ── PARSE EMPLOYEE ─────────────────────────────────────────────────────────
+
+def parse_block(block, num=1):
+    """Parse employee block with improved name extraction"""
+    rec = {"_block": num}
+    txt = block
+
+    # NAME - Use the simplified pattern from find_all_names
+    name_m = re.search(r"^([A-Z][A-Z\'\-\.]+)\s*,\s*([A-Z][A-Z\'\-\.\s]+?)(?=\s{2,}|\d{2,}|File|Marital|Gross|SSN|Title|Hire|Birth|Status|Dept|Sex|Race|Occup|Salary|Federal|State|Rate|Pay|GTL|401|Acct|Tran|Code|$)", txt, re.MULTILINE)
+    if name_m:
+        rec["Last Name"] = clean(name_m.group(1))
+        rec["First Name"] = clean(name_m.group(2))
+        if DEBUG and num <= 5:
+            print(f"\n[BLOCK {num}] Name found: {rec['Last Name']}, {rec['First Name']}")
+    else:
+        if DEBUG and num <= 5:
+            print(f"\n[BLOCK {num}] NAME NOT FOUND")
+
+    rec["Continued"] = "Yes" if "(continued)" in txt else ""
+    rec["File #"] = grep(r"File:\s*(\d+)", txt)
+    rec["Status"] = mgrep([r"Status:\s*(\w+)", r"Status\s+(\w+)"], txt)
+    rec["Dept"] = grep(r"Dept:\s*(\S+)", txt)
+    rec["Sex"] = grep(r"Sex:\s*(\w)", txt)
+    rec["Cntl"] = grep(r"Cntl:\s*(\S+)", txt)
+    rec["Race"] = grep(r"Race:\s*(\S+)", txt)
+    rec["Occup"] = grep(r"Occup:\s*(\S+)", txt)
+    rec["SSN"] = grep(r"SSN:\s*([^\n]+?)(?=\s{2,}|GTL|Title|$)", txt)
+    rec["Title"] = grep(r"Title:\s*(\S+)", txt)
+
+    # DATES
+    rec["Hire Date"] = grep(r"Hire:\s*([\d/]+)", txt)
+    rec["Term Date"] = grep(r"Term:\s*([\d/]+)", txt)
+    rec["Birth Date"] = grep(r"Birth:\s*([\d/]+)", txt)
+    rec["Date 6"] = grep(r"Date\s+6:\s*([\d/]+)", txt)
+    rec["Date 8"] = grep(r"Date\s+8:\s*([\d/]+)", txt)
+    rec["Date 9"] = grep(r"Date\s+9:\s*([\d/]+)", txt)
+
+    # ADDRESS
+    addr_lines = []
+    addr_match = re.search(r"(?:home\s*&\s*mailing\s+address|residential\s+address|address)[^\n]*\n\s*([^\n]+?)(?:\n|$)", txt, re.MULTILINE | re.I)
+    if addr_match:
+        street = clean(addr_match.group(1))
+        if street and len(street) > 4:
+            addr_lines.append(street)
+
+    if not addr_lines:
+        for m in re.finditer(r"(?:Home|Mailing|Residential)[\s:]*(\d*\s*[A-Z][A-Z\s\.\-#]+?)(?=\s*(?:Mailing|City|Monthly|Exemptions|Federal|Form|Rate|$))", txt, re.MULTILINE | re.I):
+            street = clean(m.group(1))
+            if street and len(street) > 4:
+                addr_lines.append(street)
+
+    if not addr_lines:
+        for m in re.finditer(r"^(\d+\s+[A-Z][A-Z\s\.\-]+?)(?=\s*\||Monthly|Exemptions|Federal|Form|Rate|$)", txt, re.MULTILINE | re.I):
+            street = clean(m.group(1))
+            if street and not re.search(r"(Monthly|Exemptions|Federal|Form)$", street, re.I):
+                addr_lines.append(street)
+
+    # CITY/STATE/ZIP
+    for m in re.finditer(r"(?:[A-Z][\s])*(?:Q|Y|SS)?\s*([A-Z]{2,}?)\s+([A-Z]{2})\s+(\d{5})", txt):
+        city_raw = m.group(1).strip()
+        if len(city_raw) > 2 and city_raw not in ["SS", "YY", "QQ"]:
+            city_clean = re.sub(r"\s+[A-Z]$", "", city_raw).strip()
+            if len(city_clean) > 2:
+                rec["City"] = clean(city_clean)
+                rec["State"] = m.group(2).upper()
+                rec["Zip"] = m.group(3)
+                break
+
+    if addr_lines:
+        rec["Address Line 1"] = addr_lines[0] if len(addr_lines) > 0 else ""
+        rec["Address Line 2"] = addr_lines[1] if len(addr_lines) > 1 else ""
+
+    # PAY / EARNINGS - Improved patterns for better capture
+    gross_matches = re.findall(r"Gross:\s*([\d\s,\.]+?)(?=\s+(?:Federal|Salary|State|Form|Rate|Std|Dept|File|Marital|Q\s|$))", txt, re.I)
+    if gross_matches:
+        rec["Gross"] = clean(gross_matches[0]).replace(" ", "")
+    else:
+        # Fallback: look for any number near "Gross"
+        gross_alt = grep(r"Gross[:\s]+([\d,\.]+)", txt)
+        rec["Gross"] = gross_alt if gross_alt else ""
+
+    salary_m = re.search(r"Salary:\s*([\d\s,\.]+?)(?=\s+(?:Federal|Form|Rate|2020|Std|Dept|File|Monthly|$))", txt, re.I)
+    rec["Salary"] = clean(salary_m.group(1)).replace(" ", "") if salary_m else ""
+
+    rec["Rate Calc"] = grep(r"Rate\s+Calc:\s*(\S+)", txt)
+    rec["Std Hours"] = grep(r"Std\s+Hours:\s*([\d\.]+)", txt)
+    rec["Pay Group"] = grep(r"Pay\s+Group:\s*(\d+)", txt)
+
+    # TAX
+    rec["Marital Status"] = grep(r"(J?-?Married|Single)", txt)
+    rec["Federal Exemptions"] = mgrep([r"Exemptions[^0-9]*(\d+)", r"(\d+)\s+Exemptions"], txt)
+
+    state_m = re.search(r"([\d]{2}\s+[A-Z]{2}(?:\s+[A-Z\s]+)?)", txt)
+    if state_m:
+        rec["State Tax"] = clean(state_m.group(1))
+
+    rec["GTL Cov"] = grep(r"GTL\s+Cov[^0-9]*?([\d\s]+)", txt)
+    rec["401K"] = grep(r"401K\s+([\d,\.]+)", txt)
+
+    # DIRECT DEPOSIT
+    rec["Acct #"] = mgrep([r"Acct\s*#\s*[:\-]?\s*([\dXx*\-]+)", r"Acct:\s*([\dXx*\-]+)"], txt)
+    rec["Tran/ABA"] = grep(r"Tran[/\\]ABA:\s*([\d\s]+)", txt)
+    rec["DD Code"] = grep(r"Code\s+([A-Z])\b", txt)
+    rec["DD Type"] = grep(r"(Full|Partial)\s+Deposit", txt)
+
+    return rec
+
+# ── EXTRACT FROM PDF ───────────────────────────────────────────────────────
+
+def extract_all(pdf_path, page_from=None, page_to=None):
+    employees = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        total = len(pdf.pages)
+        p_from = max(1, page_from) if page_from else 1
+        p_to = min(total, page_to) if page_to else total
+
+        if p_from > total or p_from > p_to:
+            print(f"\n  [ERROR] Invalid pages {p_from}-{p_to} (PDF has {total})")
+            return []
+
+        def read_page(page_num):
+            page = pdf.pages[page_num]
+            return page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+
+        all_text = ""
+        page_range = range(p_from-1, p_to)
+        with tqdm(total=len(page_range), desc="[READING]", unit="pg", colour="cyan", ncols=65) as pbar:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(read_page, pn): pn for pn in page_range}
+                for future in as_completed(futures):
+                    t = future.result()
+                    all_text += t + "\n"
+                    pbar.update(1)
+
+        if not all_text.strip():
+            return []
+
+        blocks = split_by_names(all_text)
+
+        if not blocks:
+            return []
+
+        def parse_and_filter(item):
+            i, block = item
+            try:
+                rec = parse_block(block, i+1)
+                if rec.get("Last Name") or rec.get("First Name") or rec.get("File #"):
+                    return rec
+            except Exception as e:
+                if DEBUG:
+                    print(f"  [WARNING] Block {i+1}: {e}")
+            return None
+
+        with tqdm(total=len(blocks), desc="[PARSING]", unit="emp", colour="green", ncols=65) as pbar:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(parse_and_filter, (i, block)): i for i, block in enumerate(blocks)}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        employees.append(result)
+                    pbar.update(1)
+
+    return employees
+
+# ── EXCEL WRITER ───────────────────────────────────────────────────────────
+
+COLUMNS = [
+    "Last Name", "First Name", "Continued",
+    "File #", "Status", "Dept", "Sex", "Cntl", "Race", "Occup", "SSN", "Title",
+    "Hire Date", "Term Date", "Birth Date", "Date 6", "Date 8", "Date 9",
+    "Address Line 1", "Address Line 2", "City", "State", "Zip",
+    "Gross", "Salary", "Rate Calc", "Std Hours", "Pay Group",
+    "Marital Status", "Federal Exemptions", "State Tax",
+    "GTL Cov", "401K", "Acct #", "Tran/ABA", "DD Code", "DD Type",
+    "_block",
+]
+
+STD_COLUMNS = [
+    "DOCID", "DOCID::Filename", "DOCID::File Extension",
+    "Last Name", "First Name", "Middle Name", "Suffix",
+    "Residential Address", "City", "Zip Code", "Country of Residence",
+    "State of Residence (if US)", "Province of Residence (if Canada)",
+    "Address Comments", "PI Notes",
+    "Government- Issued Identification", "Birth Information",
+    "Contact Information", "Financial Account Information",
+    "Access Credentials (Non-Financial Account)", "Health Related Information",
+    "Biometric Data", "Family Information", "Demographic Information",
+    "Work-Related Information",
+    "Full Date of Birth (MM/DD/YYYY)", "Passport Number", "Passport Country",
+    "Government-Issued ID Number", "Government ID Issuing Country",
+    "Driver's License Number", "DL Issuing Country",
+    "DL Issuing State (if US)", "DL Issuing Province (if Canada)",
+    "Social Security Number", "Tax Identification Number",
+    "Employee Identification Number", "Phone Number", "Email Address - Personal",
+]
+
+def _has_value(v):
+    s = str(v).strip().replace(",", "").replace(" ", "")
+    return bool(s) and s != "0"
+
+def _validate_ssn(ssn):
+    if not ssn:
+        return ""
+    s = str(ssn).strip()
+    if re.match(r"^\d{3}-\d{2}-\d{4}$", s) or re.match(r"^\d{9}$", s):
+        return s
+    return ""
+
+def build_std_row(emp, pdf_filename=""):
+    stem = Path(pdf_filename).stem if pdf_filename else ""
+    addr = emp.get("Address Line 1", "")
+    addr2 = emp.get("Address Line 2", "")
+    if addr and addr2:
+        addr = addr + ", " + addr2
+
+    gross_or_salary = _has_value(emp.get("Gross", "")) or _has_value(emp.get("Salary", ""))
+    valid_ssn = _validate_ssn(emp.get("SSN", ""))
+
+    return {
+        "DOCID": stem,
+        "DOCID::Filename": pdf_filename,
+        "DOCID::File Extension": ".pdf" if pdf_filename else "",
+        "Last Name": emp.get("Last Name", ""),
+        "First Name": emp.get("First Name", ""),
+        "Middle Name": "",
+        "Suffix": "",
+        "Residential Address": addr,
+        "City": emp.get("City", ""),
+        "Zip Code": emp.get("Zip", ""),
+        "Country of Residence": "",
+        "State of Residence (if US)": emp.get("State", ""),
+        "Province of Residence (if Canada)": "",
+        "Address Comments": "",
+        "PI Notes": "",
+        "Government- Issued Identification": True if valid_ssn else "",
+        "Birth Information": True if emp.get("Birth Date", "") else "",
+        "Contact Information": "",
+        "Financial Account Information": True if emp.get("Acct #", "") else "",
+        "Access Credentials (Non-Financial Account)": "",
+        "Health Related Information": "",
+        "Biometric Data": "",
+        "Family Information": "",
+        "Demographic Information": "",
+        "Work-Related Information": True if gross_or_salary else "",
+        "Full Date of Birth (MM/DD/YYYY)": emp.get("Birth Date", ""),
+        "Passport Number": "",
+        "Passport Country": "",
+        "Government-Issued ID Number": "",
+        "Government ID Issuing Country": "",
+        "Driver's License Number": "",
+        "DL Issuing Country": "",
+        "DL Issuing State (if US)": "",
+        "DL Issuing Province (if Canada)": "",
+        "Social Security Number": valid_ssn,
+        "Tax Identification Number": "",
+        "Employee Identification Number": emp.get("File #", ""),
+        "Phone Number": "",
+        "Email Address - Personal": "",
+    }
+
+def write_excel(employees, out_path, pdf_filename=""):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ADP Master Control"
+
+    for ci, col in enumerate(COLUMNS, 1):
+        c = ws.cell(row=1, column=ci, value=col)
+        c.font = Font(bold=True, name="Arial", size=10)
+
+    with tqdm(total=len(employees), desc="💾 Excel", unit="row", colour="yellow", ncols=65) as pbar:
+        for ri, emp in enumerate(employees, 2):
+            for ci, col in enumerate(COLUMNS, 1):
+                ws.cell(row=ri, column=ci, value=emp.get(col, ""))
+            pbar.update(1)
+
+    for ci, col in enumerate(COLUMNS, 1):
+        max_len = len(col)
+        for ri in range(2, min(len(employees)+2, 52)):
+            val = ws.cell(row=ri, column=ci).value or ""
+            max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[get_column_letter(ci)].width = min(max_len + 2, 50)
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}1"
+
+    ws2 = wb.create_sheet("Standardized_Data")
+
+    for ci, col in enumerate(STD_COLUMNS, 1):
+        c = ws2.cell(row=1, column=ci, value=col)
+        c.font = Font(bold=True, name="Arial", size=10)
+
+    for ri, emp in enumerate(employees, 2):
+        row_data = build_std_row(emp, pdf_filename)
+        for ci, col in enumerate(STD_COLUMNS, 1):
+            ws2.cell(row=ri, column=ci, value=row_data.get(col, ""))
+
+    for ci, col in enumerate(STD_COLUMNS, 1):
+        max_len = len(col)
+        for ri in range(2, min(len(employees)+2, 52)):
+            val = ws2.cell(row=ri, column=ci).value
+            if val is not None and val != "":
+                max_len = max(max_len, len(str(val)))
+        ws2.column_dimensions[get_column_letter(ci)].width = min(max_len + 2, 50)
+
+    ws2.freeze_panes = "A2"
+
+    wb.save(out_path)
+
+# ── MAIN ───────────────────────────────────────────────────────────────────
+
+def process_single_file(pdf_path, out_path=None):
+    """Process ONE PDF file"""
+    if not out_path:
+        out_path = str(Path(pdf_path).stem + "_employees.xlsx")
+
+    print(f"\n{'='*55}")
+    print(f"  ADP Master Control Extractor (IMPROVED)")
+    print(f"{'='*55}")
+    print(f"  Input : {pdf_path}")
+    print(f"  Output: {out_path}")
+    print(f"{'='*55}")
+
+    employees = extract_all(pdf_path, page_from=PAGE_FROM, page_to=PAGE_TO)
+    print(f"\n  [RECORDS] Count: {len(employees)}")
+
+    if not employees:
+        print("\n❌ No records extracted.")
+        return False
+
+    write_excel(employees, out_path, pdf_filename=Path(pdf_path).name)
+    print(f"\n{'='*55}")
+    print(f"  [SUCCESS] Done! -> {out_path}")
+    print(f"{'='*55}\n")
+    return True
+
+def process_folder(folder_path):
+    """Process ALL PDFs in FOLDER"""
+    folder = Path(folder_path)
+    pdf_files = sorted(folder.glob("*.pdf"))
+
+    if not pdf_files:
+        print(f"[ERROR] No PDF files in: {folder}")
+        return
+
+    print(f"\n{'='*55}")
+    print(f"  ADP Batch Extractor (IMPROVED)")
+    print(f"{'='*55}")
+    print(f"  Folder: {folder.absolute()}")
+    print(f"  Files : {len(pdf_files)} PDF(s)")
+    print(f"{'='*55}\n")
+
+    success = 0
+    failed = 0
+
+    for pdf_file in tqdm(pdf_files, desc="Processing", unit="file", colour="cyan", ncols=70):
+        out_file = pdf_file.parent / f"{pdf_file.stem}_employees.xlsx"
+        try:
+            employees = extract_all(str(pdf_file))
+            if not employees:
+                tqdm.write(f"  ⚠️  {pdf_file.name}: No records")
+                failed += 1
+                continue
+            write_excel(employees, str(out_file), pdf_filename=pdf_file.name)
+            tqdm.write(f"  ✅ {pdf_file.name} ({len(employees)} records)")
+            success += 1
+        except Exception as e:
+            tqdm.write(f"  ❌ {pdf_file.name}: {e}")
+            failed += 1
+
+    print(f"\n{'='*55}")
+    print(f"  [SUCCESS] {success}  |  [FAILED] {failed}")
+    print(f"{'='*55}\n")
+
+# ── ENTRY POINT ────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    if len(args) < 1:
+        print(__doc__)
+        sys.exit(0)
+
+    target = args[0]
+    target_path = Path(target)
+
+    if target_path.is_file() and target_path.suffix.lower() == ".pdf":
+        out_path = args[1] if len(args) > 1 and not args[1].startswith("--") else None
+        success = process_single_file(str(target_path), out_path)
+        sys.exit(0 if success else 1)
+
+    elif target_path.is_dir():
+        process_folder(target_path)
+        sys.exit(0)
+
+    else:
+        print(f"[ERROR] {target}")
+        print(f"   Not a valid PDF file or folder")
+        sys.exit(1)
