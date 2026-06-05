@@ -45,48 +45,43 @@ def extract_name(text):
     """Extract person's name from text"""
     lines = text.split('\n')
 
-    # Look for name after "e/f Employee's name, address, and zip code"
+    # Look for "e/f" marker which indicates employee info section
     for i, line in enumerate(lines):
-        if "e/f" in line or "Employee's name" in line:
-            # Next non-empty line should be the name
-            for j in range(i + 1, min(i + 4, len(lines))):
-                candidate = lines[j].strip()
-                if candidate and not any(c.isdigit() for c in candidate) and len(candidate.split()) >= 2:
-                    return candidate
+        if "e/f" in line.lower() and "employee" in line.lower():
+            # Name is the next non-empty line after the e/f marker
+            if i + 1 < len(lines):
+                name = lines[i + 1].strip()
+                if name:
+                    return name
 
     return None
 
 def extract_address(text):
     """Extract address from text"""
     lines = text.split('\n')
-    address_lines = []
-    found_name = False
-    skip_next = False
 
-    # Find name first, then get address lines after it
+    # Look for "e/f" marker which indicates employee info section
     for i, line in enumerate(lines):
-        line_stripped = line.strip()
+        if "e/f" in line.lower() and "employee" in line.lower():
+            # Skip name (line i+1), then get address lines
+            # Typically address is in lines i+2 and i+3
+            address_parts = []
 
-        if "e/f" in line or "Employee's name" in line:
-            # Skip this header line and find the name in the next non-empty line
-            for j in range(i + 1, min(i + 4, len(lines))):
-                candidate = lines[j].strip()
-                if candidate and not any(c.isdigit() for c in candidate) and len(candidate.split()) >= 2:
-                    # Found name, now get next 2 address lines
-                    skip_next = True
-                    start_idx = j + 1
-                    break
+            # Get line i+2 (street address)
+            if i + 2 < len(lines):
+                addr_line = lines[i + 2].strip()
+                if addr_line and not any(skip in addr_line.lower() for skip in ['wage', 'tax', 'social', 'medicare']):
+                    address_parts.append(addr_line)
 
-            if skip_next:
-                for k in range(start_idx, min(start_idx + 3, len(lines))):
-                    addr_line = lines[k].strip()
-                    if addr_line and not any(skip in addr_line.lower() for skip in ['wage', 'tax', 'social', 'medicare', 'employer', 'ein']):
-                        address_lines.append(addr_line)
-                        if len(address_lines) >= 2:
-                            break
-                break
+            # Get line i+3 (city, state, zip)
+            if i + 3 < len(lines):
+                addr_line = lines[i + 3].strip()
+                if addr_line and not any(skip in addr_line.lower() for skip in ['wage', 'tax', 'social', 'medicare']):
+                    address_parts.append(addr_line)
 
-    return ', '.join(address_lines) if address_lines else None
+            return ', '.join(address_parts) if address_parts else None
+
+    return None
 
 def extract_gross_salary(text):
     """Extract gross salary/income from text"""
