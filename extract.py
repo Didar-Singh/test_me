@@ -1,58 +1,83 @@
 import pandas as pd
 import csv
+import re
 
-# File names
+# Files
 input_csv = "input.csv"
 output_excel = "output.xlsx"
 
-# Keyword to search
+# Search text
 keyword = "PURCHASE, NY 10577"
 
-# Store final records
+# Store results
 records = []
 
 # Read CSV
 with open(input_csv, 'r', encoding='utf-8', errors='ignore') as file:
     reader = csv.reader(file)
 
-    # Convert all rows into simple list
-    all_rows = [row for row in reader]
+    # Flatten all cells
+    all_data = []
 
-# Flatten all cells into one list
-flat_data = []
+    for row in reader:
+        for cell in row:
+            cell = cell.strip()
 
-for row in all_rows:
-    for cell in row:
-        if cell.strip():
-            flat_data.append(cell.strip())
+            if cell:
+                all_data.append(cell)
 
-# Search keyword and extract next 5 rows
-for i in range(len(flat_data)):
+# Function to filter junk rows
+def is_valid_text(text):
 
-    if keyword.lower() in flat_data[i].lower():
+    # Ignore PDF filenames
+    if text.lower().endswith(".pdf"):
+        return False
 
-        # Take matched row + next 5 rows
-        extracted = flat_data[i:i+6]
+    # Ignore only numbers
+    if re.fullmatch(r"\d+", text):
+        return False
 
-        # Fill blank if less than 6 rows
+    return True
+
+# Process data
+for i in range(len(all_data)):
+
+    if keyword.lower() in all_data[i].lower():
+
+        extracted = []
+
+        # Add matched row
+        extracted.append(all_data[i])
+
+        # Get next valid 5 rows
+        j = i + 1
+
+        while j < len(all_data) and len(extracted) < 6:
+
+            if is_valid_text(all_data[j]):
+                extracted.append(all_data[j])
+
+            j += 1
+
+        # Fill blanks if needed
         while len(extracted) < 6:
             extracted.append("")
 
         records.append(extracted)
 
-# Create dataframe
+# Create Excel
 columns = [
-    "Row_1",
-    "Row_2",
-    "Row_3",
-    "Row_4",
-    "Row_5",
-    "Row_6"
+    "Line_1",
+    "Line_2",
+    "Line_3",
+    "Line_4",
+    "Line_5",
+    "Line_6"
 ]
 
 df = pd.DataFrame(records, columns=columns)
 
-# Export to Excel
+# Save
 df.to_excel(output_excel, index=False)
 
-print(f"Done! {len(records)} records exported to {output_excel}")
+print(f"Done! {len(records)} records saved to {output_excel}")
