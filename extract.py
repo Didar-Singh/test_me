@@ -2,26 +2,27 @@ import pandas as pd
 import csv
 import re
 
-# Files
+# Input / Output files
 input_csv = "input.csv"
 output_excel = "output.xlsx"
 
-# Keyword
+# Search keyword
 keyword = "PURCHASE, NY 10577"
 
-# Store records
+# Store final records
 records = []
 
 # Read CSV
 with open(input_csv, 'r', encoding='utf-8', errors='ignore') as file:
     reader = csv.reader(file)
-
-    # Convert all rows
     rows = list(reader)
 
-# Process row by row
-for row in rows:
+# Loop using index
+for i in range(len(rows)):
 
+    row = rows[i]
+
+    # Skip bad rows
     if len(row) < 3:
         continue
 
@@ -29,27 +30,26 @@ for row in rows:
     page_num = row[1].strip()
     text = row[2].strip()
 
-    # Search keyword
+    # Find keyword
     if keyword.lower() in text.lower():
 
-        extracted = []
-        extracted.append(text)
+        extracted = [text]
 
-        # Start checking next rows
-        current_index = rows.index(row) + 1
+        # Capture next 5 valid lines
+        j = i + 1
 
-        while current_index < len(rows) and len(extracted) < 6:
+        while j < len(rows) and len(extracted) < 6:
 
-            next_row = rows[current_index]
+            next_row = rows[j]
 
             if len(next_row) >= 3:
 
                 next_text = next_row[2].strip()
 
-                # Skip blank lines
+                # Skip blanks
                 if next_text:
 
-                    # Skip PDF filenames
+                    # Skip pdf names
                     if not next_text.lower().endswith(".pdf"):
 
                         # Skip only numbers
@@ -57,13 +57,13 @@ for row in rows:
 
                             extracted.append(next_text)
 
-            current_index += 1
+            j += 1
 
-        # Add blanks if needed
+        # Fill blanks
         while len(extracted) < 6:
             extracted.append("")
 
-        # Final row
+        # Save record with correct filename
         records.append([
             file_name,
             page_num,
@@ -75,10 +75,10 @@ for row in rows:
             extracted[5]
         ])
 
-# Create dataframe
+# Excel columns
 columns = [
     "File Name",
-    "Page Num",
+    "Page Number",
     "Line_1",
     "Line_2",
     "Line_3",
@@ -87,9 +87,10 @@ columns = [
     "Line_6"
 ]
 
+# Create dataframe
 df = pd.DataFrame(records, columns=columns)
 
 # Save Excel
 df.to_excel(output_excel, index=False)
 
-print(f"Done! {len(records)} records saved to {output_excel}")
+print(f"Done! {len(records)} records exported to {output_excel}")
