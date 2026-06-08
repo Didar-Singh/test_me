@@ -266,8 +266,24 @@ def extract_records(rows):
 
 
 # ── Step 3: Write Excel (separate file per source PDF) ────────────────────
-def write_excel(records, output_dir="."):
+def write_excel(records, output_target="."):
     print("\n📊 Writing Excel files by source...")
+    
+    # Determine if output_target is a directory or base filename
+    output_target = output_target or "."
+    output_path = Path(output_target)
+    
+    # If it looks like a file (has .xlsx extension), use its directory
+    if str(output_target).endswith('.xlsx'):
+        output_dir = output_path.parent
+        base_name = output_path.stem  # filename without extension
+    else:
+        output_dir = output_path
+        base_name = None
+    
+    # Create output directory if it doesn't exist
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Group records by source file
     files_data = {}
@@ -280,10 +296,15 @@ def write_excel(records, output_dir="."):
     output_paths = []
     for file_name, file_records in files_data.items():
         # Generate output filename: Q00897.01-xxx.pdf → Q00897.01-xxx_payroll.xlsx
-        base_name = file_name.rsplit('.', 1)[0]  # remove .pdf
-        out_file = f"{output_dir}/{base_name}_payroll.xlsx"
+        if base_name and len(files_data) == 1:
+            # Single file mode: use the provided filename
+            out_file = str(output_dir / f"{base_name}.xlsx")
+        else:
+            # Multiple files: use source PDF name as base
+            pdf_base = file_name.rsplit('.', 1)[0]  # remove .pdf
+            out_file = str(output_dir / f"{pdf_base}_payroll.xlsx")
         
-        pb = ProgressBar(len(file_records), label=f"  {file_name}")
+        pb = ProgressBar(len(file_records), label=f"  {Path(file_name).name}")
         
         try:
             import openpyxl
@@ -361,30 +382,40 @@ def write_excel(records, output_dir="."):
 # ── Entry point ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python extract_payroll_excel.py <input.csv> [output_dir]")
-        print("       Writes separate Excel files for each source PDF")
+        print("Usage:")
+        print("  Single output file  : python extract_payroll_excel.py <input.csv> <output.xlsx>")
+        print("  Multiple files      : python extract_payroll_excel.py <input.csv> <output_dir>")
+        print("\nExamples:")
+        print("  python extract_payroll_excel.py data.csv results.xlsx")
+        print("  python extract_payroll_excel.py data.csv ./output/")
         sys.exit(1)
 
     in_csv  = sys.argv[1]
-    out_dir = sys.argv[2] if len(sys.argv) > 2 else "."
+    out_target = sys.argv[2] if len(sys.argv) > 2 else "payroll_output"
 
     if not Path(in_csv).exists():
-        print(f"Error: {in_csv} not found")
+        print(f"❌ Error: {in_csv} not found")
         sys.exit(1)
 
     t0 = time.time()
 
-    rows    = load_csv(in_csv)
-    records = extract_records(rows)
-    output_paths = write_excel(records, out_dir)
+    try:
+        rows    = load_csv(in_csv)
+        records = extract_records(rows)
+        output_paths = write_excel(records, out_target)
 
-    elapsed = time.time() - t0
-    print(f"\n{'─'*70}")
-    print(f"  ✅  Done in {elapsed:.1f}s")
-    print(f"  📁  Source    : {in_csv}")
-    print(f"  👤  Total     : {len(records):,} employee records")
-    print(f"  📊  Output    : {len(output_paths)} file(s)")
-    print(f"{'─'*70}")
-    for file_name, out_path, count in output_paths:
-        print(f"    • {Path(out_path).name:<45} ({count} records)")
-    print(f"{'─'*70}\n")
+        elapsed = time.time() - t0
+        print(f"\n{'─'*70}")
+        print(f"  ✅  Done in {elapsed:.1f}s")
+        print(f"  📁  Source    : {in_csv}")
+        print(f"  👤  Total     : {len(records):,} employee records")
+        print(f"  📊  Output    : {len(output_paths)} file(s)")
+        print(f"{'─'*70}")
+        for file_name, out_path, count in output_paths:
+            print(f"    • {Path(out_path).name:<50} ({count} records)")
+        print(f"{'─'*70}\n")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
