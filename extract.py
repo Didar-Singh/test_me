@@ -38,7 +38,7 @@ for i in range(len(rows)):
         # Capture next 5 valid lines
         j = i + 1
 
-        while j < len(rows) and len(extracted) < 6:
+        while j < len(rows) and len(extracted) < 10:
 
             next_row = rows[j]
 
@@ -60,7 +60,7 @@ for i in range(len(rows)):
             j += 1
 
         # Fill blanks
-        while len(extracted) < 6:
+        while len(extracted) < 10:
             extracted.append("")
 
         # Save record with correct filename
@@ -72,7 +72,11 @@ for i in range(len(rows)):
             extracted[2],
             extracted[3],
             extracted[4],
-            extracted[5]
+            extracted[5],
+            extracted[6],
+            extracted[7],
+            extracted[8],
+            extracted[9]
         ])
 
 # Excel columns
@@ -84,7 +88,11 @@ columns = [
     "Line_3",
     "Line_4",
     "Line_5",
-    "Line_6"
+    "Line_6",
+    "Line_7",
+    "Line_8",
+    "Line_9",
+    "Line_10"
 ]
 
 # Create dataframe
