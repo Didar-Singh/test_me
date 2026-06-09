@@ -35,8 +35,12 @@ def parse_name(last_name_line, first_name_line=""):
     if ',' in last_name_line:
         text_after_comma = last_name_line.split(',', 1)[1].strip()
 
-    # Get first name from either after comma or next line
-    first_name_text = text_after_comma if text_after_comma else first_name_line
+    # Determine which text to use for first name
+    # If text after comma starts with a number/special char, use next line instead
+    if text_after_comma and not re.match(r'^\d', text_after_comma):
+        first_name_text = text_after_comma
+    else:
+        first_name_text = first_name_line
 
     # Extract words before numbers/special chars
     words = []
