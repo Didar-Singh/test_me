@@ -2,7 +2,7 @@
 Convert Excel files from old format to Latest Template format.
 
 This script:
-1. Reads files with "Standerdized_Data" sheet in old format
+1. Reads files with "Standardized_Data" sheet in old format (handles both spellings)
 2. Converts to Latest Template format
 3. Merges duplicate entries (same Last Name + First Name + Middle Name + Suffix)
 4. Fills "Data Subject Type" column with "Employee"
@@ -75,19 +75,21 @@ NEW_HEADERS = [
 
 
 def read_old_format(filepath):
-    """Read data from Standerdized_Data sheet in old format."""
+    """Read data from Standardized_Data sheet in old format."""
     try:
         wb = openpyxl.load_workbook(filepath)
 
-        # Find the sheet (case insensitive)
+        # Find the sheet (case insensitive, handle both spellings)
         sheet_name = None
         for name in wb.sheetnames:
-            if name.lower() == 'standerdized_data':
+            name_lower = name.lower()
+            # Check for both "standardized_data" and "standerdized_data" spellings
+            if 'standardized_data' in name_lower or 'standerdized_data' in name_lower:
                 sheet_name = name
                 break
 
         if not sheet_name:
-            print(f"  ERROR: 'Standerdized_Data' sheet not found. Available sheets: {wb.sheetnames}")
+            print(f"  ERROR: 'Standardized_Data' sheet not found. Available sheets: {wb.sheetnames}")
             return None
 
         ws = wb[sheet_name]
