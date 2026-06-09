@@ -69,67 +69,6 @@ def read_old_format(filepath):
         return None
 
 
-def clean_address(address):
-    """Clean address by removing unwanted words and EVERYTHING AFTER them."""
-    if not address:
-        return address
-
-    import re
-
-    cleaned = str(address)
-
-    # Words/patterns to remove (and everything after) from addresses (case insensitive)
-    # Frequency-related words and all variations
-    # NOTE: Order matters - longer/more specific patterns first
-    unwanted_patterns = [
-        # Compound frequency terms (must come before single words)
-        r'\b(bi\s*-?\s*weekly).*$',
-        r'\b(semi\s*-?\s*weekly).*$',
-        r'\b(bi\s*-?\s*daily).*$',
-        r'\b(semi\s*-?\s*daily).*$',
-        r'\b(bi\s*-?\s*monthly).*$',
-        r'\b(semi\s*-?\s*monthly).*$',
-        r'\b(bi\s*-?\s*yearly).*$',
-        r'\b(bi\s*-?\s*annual).*$',
-        r'\b(semi\s*-?\s*yearly).*$',
-        r'\b(semi\s*-?\s*annual).*$',
-        r'\b(bi\s*-?\s*quarterly).*$',
-
-        # Single frequency terms
-        r'\bweekly.*$',
-        r'\bdaily.*$',
-        r'\bmonthly.*$',
-        r'\byearly.*$',
-        r'\bannually.*$',
-        r'\bannual.*$',
-        r'\bquarterly.*$',
-        r'\bhourl?y.*$',
-        r'\b(every\s+\w+).*$',          # "every day", "every week", etc.
-
-        # Temporary/Test related
-        r'\btemporary.*$',
-        r'\btemp.*$',
-        r'\btest.*$',
-    ]
-
-    # Remove unwanted words and everything after (case insensitive)
-    for pattern in unwanted_patterns:
-        if re.search(pattern, cleaned, flags=re.IGNORECASE):
-            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-            break  # Stop after first match to preserve intended behavior
-
-    # Clean up extra spaces
-    cleaned = ' '.join(cleaned.split())
-
-    # Remove trailing special characters
-    cleaned = cleaned.rstrip('*#@~!-_.,')
-
-    # Clean up again after removing special chars
-    cleaned = cleaned.strip()
-
-    return cleaned if cleaned else address
-
-
 def convert_row(old_headers, old_row):
     """Convert a row from old format to new format."""
     # Create a dict from old headers and row for easier lookup
@@ -142,10 +81,6 @@ def convert_row(old_headers, old_row):
             new_row.append('Employee')
         elif header == 'Student-Related Information':
             new_row.append(None)
-        elif header == 'Residential Address':
-            # Clean the address field
-            address = old_data.get(header)
-            new_row.append(clean_address(address))
         else:
             new_row.append(old_data.get(header))
 
