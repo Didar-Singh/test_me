@@ -70,7 +70,7 @@ def read_old_format(filepath):
 
 
 def clean_address(address):
-    """Clean address by removing unwanted words and extra spaces."""
+    """Clean address by removing unwanted words and EVERYTHING AFTER them."""
     if not address:
         return address
 
@@ -78,26 +78,45 @@ def clean_address(address):
 
     cleaned = str(address)
 
-    # Words/patterns to remove from addresses (case insensitive)
-    # Order matters: remove longer phrases first
+    # Words/patterns to remove (and everything after) from addresses (case insensitive)
+    # Frequency-related words and all variations
+    # NOTE: Order matters - longer/more specific patterns first
     unwanted_patterns = [
-        r'\b(bi\s*-?\s*weekly)\b',      # bi-weekly, bi weekly, biweekly
-        r'\b(bi\s*-?\s*daily)\b',       # bi-daily, bi daily
-        r'\b(bi\s*-?\s*monthly)\b',     # bi-monthly, bi monthly
-        r'\b(semi\s*-?\s*weekly)\b',    # semi-weekly
-        r'\bweekly\b',
-        r'\bdaily\b',
-        r'\btemporary\b',
-        r'\btemp\b',
-        r'\btest\b',
-        r'\bmonthly\b',
-        r'\byearly\b',
-        r'\bannually\b',
+        # Compound frequency terms (must come before single words)
+        r'\b(bi\s*-?\s*weekly).*$',
+        r'\b(semi\s*-?\s*weekly).*$',
+        r'\b(bi\s*-?\s*daily).*$',
+        r'\b(semi\s*-?\s*daily).*$',
+        r'\b(bi\s*-?\s*monthly).*$',
+        r'\b(semi\s*-?\s*monthly).*$',
+        r'\b(bi\s*-?\s*yearly).*$',
+        r'\b(bi\s*-?\s*annual).*$',
+        r'\b(semi\s*-?\s*yearly).*$',
+        r'\b(semi\s*-?\s*annual).*$',
+        r'\b(bi\s*-?\s*quarterly).*$',
+
+        # Single frequency terms
+        r'\bweekly.*$',
+        r'\bdaily.*$',
+        r'\bmonthly.*$',
+        r'\byearly.*$',
+        r'\bannually.*$',
+        r'\bannual.*$',
+        r'\bquarterly.*$',
+        r'\bhourl?y.*$',
+        r'\b(every\s+\w+).*$',          # "every day", "every week", etc.
+
+        # Temporary/Test related
+        r'\btemporary.*$',
+        r'\btemp.*$',
+        r'\btest.*$',
     ]
 
-    # Remove unwanted words (case insensitive)
+    # Remove unwanted words and everything after (case insensitive)
     for pattern in unwanted_patterns:
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        if re.search(pattern, cleaned, flags=re.IGNORECASE):
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+            break  # Stop after first match to preserve intended behavior
 
     # Clean up extra spaces
     cleaned = ' '.join(cleaned.split())
