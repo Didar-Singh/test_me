@@ -33,7 +33,7 @@ NEW_HEADERS = [
 
 
 def read_old_format(filepath):
-    """Read data from Standardized_Data sheet in old format."""
+    """Read data from Standardized_Data sheet in old format, return workbook too."""
     try:
         wb = openpyxl.load_workbook(filepath)
 
@@ -47,6 +47,7 @@ def read_old_format(filepath):
 
         if not sheet_name:
             print(f"  ERROR: 'Standardized_Data' sheet not found. Available sheets: {wb.sheetnames}")
+            wb.close()
             return None
 
         ws = wb[sheet_name]
@@ -61,8 +62,8 @@ def read_old_format(filepath):
             if any(cell is not None for cell in row):
                 data.append(row)
 
-        wb.close()
-        return old_headers, data
+        # Return headers, data, and workbook (don't close yet - we need it for saving)
+        return old_headers, data, wb
 
     except Exception as e:
         print(f"  ERROR reading file: {str(e)}")
@@ -131,13 +132,22 @@ def merge_duplicates(data, headers):
     return merged
 
 
-def save_converted_file(filepath, data):
-    """Save converted data to the same file or a new file."""
+def save_converted_file(filepath, data, original_wb):
+    """Save converted data while keeping all other sheets from original file."""
     try:
-        # Create new workbook with new template structure
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = 'Standardized_Data'
+        # Find the Standardized_Data sheet in original workbook
+        sheet_to_replace = None
+        for name in original_wb.sheetnames:
+            if 'standardized' in name.lower() or 'standerdized' in name.lower():
+                sheet_to_replace = name
+                break
+
+        # Remove the old Standardized_Data sheet if it exists
+        if sheet_to_replace and sheet_to_replace in original_wb.sheetnames:
+            del original_wb[sheet_to_replace]
+
+        # Create new sheet with converted data
+        ws = original_wb.create_sheet('Standardized_Data', 0)  # Insert at position 0
 
         # Write headers
         for col_idx, header in enumerate(NEW_HEADERS, 1):
@@ -148,9 +158,9 @@ def save_converted_file(filepath, data):
             for col_idx, value in enumerate(row_data, 1):
                 ws.cell(row=row_idx, column=col_idx, value=value)
 
-        # Save to same file
-        wb.save(filepath)
-        wb.close()
+        # Save to same file with all sheets
+        original_wb.save(filepath)
+        original_wb.close()
         return True
 
     except Exception as e:
@@ -167,7 +177,7 @@ def process_file(filepath):
     if result is None:
         return False
 
-    old_headers, old_data = result
+    old_headers, old_data, wb = result
     print(f"  Found {len(old_data)} data rows")
 
     # Convert each row
@@ -182,9 +192,9 @@ def process_file(filepath):
     merged_data = merge_duplicates(converted_data, NEW_HEADERS)
     print(f"  After merging duplicates: {len(merged_data)} rows")
 
-    # Save
-    if save_converted_file(filepath, merged_data):
-        print(f"  SUCCESS: File saved")
+    # Save (keep other sheets)
+    if save_converted_file(filepath, merged_data, wb):
+        print(f"  SUCCESS: File saved (other sheets preserved)")
         return True
     else:
         return False
