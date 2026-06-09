@@ -2,7 +2,7 @@
 Convert Excel files from old format to Latest Template format.
 
 This script:
-1. Reads files with "Standardized_Data" sheet in old format (handles both spellings)
+1. Reads files with "Standardized_Data" sheet in old format
 2. Converts to Latest Template format
 3. Merges duplicate entries (same Last Name + First Name + Middle Name + Suffix)
 4. Fills "Data Subject Type" column with "Employee"
@@ -15,48 +15,6 @@ import os
 import sys
 from pathlib import Path
 
-# Column mapping from OLD format to NEW format
-COLUMN_MAPPING = {
-    'DOCID': ('DOCID', 1, 1),
-    'Last Name': ('Last Name', 4, 2),
-    'First Name': ('First Name', 5, 3),
-    'Middle Name': ('Middle Name', 6, 4),
-    'Suffix': ('Suffix', 7, 5),
-    'Data Subject Type': ('Data Subject Type', None, 6),  # NEW - fill with "Employee"
-    'Residential Address': ('Residential Address', 8, 7),
-    'State of Residence (if US)': ('State of Residence (if US)', 12, 8),
-    'Country of Residence': ('Country of Residence', 11, 9),
-    'City': ('City', 9, 10),
-    'Province of Residence (if Canada)': ('Province of Residence (if Canada)', 13, 11),
-    'Zip Code': ('Zip Code', 10, 12),
-    'Address Comments': ('Address Comments', 14, 13),
-    'Phone Number': ('Phone Number', 38, 14),
-    'Email Address - Personal': ('Email Address - Personal', 39, 15),
-    'PI Notes': ('PI Notes', 15, 16),
-    'Contact Information': ('Contact Information', 18, 17),
-    'Government- Issued Identification': ('Government- Issued Identification', 16, 18),
-    'Social Security Number': ('Social Security Number', 35, 19),
-    'Passport Number': ('Passport Number', 27, 20),
-    'Passport Country': ('Passport Country', 28, 21),
-    'Driver\'s License Number': ('Driver\'s License Number', 31, 22),
-    'DL Issuing Country': ('DL Issuing Country', 32, 23),
-    'DL Issuing Province (if Canada)': ('DL Issuing Province (if Canada)', 34, 24),
-    'DL Issuing State (if US)': ('DL Issuing State (if US)', 33, 25),
-    'Government-Issued ID Number': ('Government-Issued ID Number', 29, 26),
-    'Government ID Issuing Country': ('Government ID Issuing Country', 30, 27),
-    'Health Related Information': ('Health Related Information', 21, 28),
-    'Birth Information': ('Birth Information', 17, 29),
-    'Full Date of Birth (MM/DD/YYYY)': ('Full Date of Birth (MM/DD/YYYY)', 26, 30),
-    'Financial Account Information': ('Financial Account Information', 19, 31),
-    'Access Credentials (Non-Financial Account)': ('Access Credentials (Non-Financial Account)', 20, 32),
-    'Biometric Data': ('Biometric Data', 22, 33),
-    'Demographic Information': ('Demographic Information', 24, 34),
-    'Family Information': ('Family Information', 23, 35),
-    'Student-Related Information': ('Student-Related Information', None, 36),  # NEW
-    'Work-Related Information': ('Work-Related Information', 25, 37),
-    'Employee Identification Number': ('Employee Identification Number', 37, 38),
-}
-
 # New template header in order
 NEW_HEADERS = [
     'DOCID', 'Last Name', 'First Name', 'Middle Name', 'Suffix',
@@ -65,7 +23,7 @@ NEW_HEADERS = [
     'Zip Code', 'Address Comments', 'Phone Number', 'Email Address - Personal',
     'PI Notes', 'Contact Information', 'Government- Issued Identification',
     'Social Security Number', 'Passport Number', 'Passport Country',
-    'Driver\'s License Number', 'DL Issuing Country', 'DL Issuing Province (if Canada)',
+    "Driver's License Number", 'DL Issuing Country', 'DL Issuing Province (if Canada)',
     'DL Issuing State (if US)', 'Government-Issued ID Number', 'Government ID Issuing Country',
     'Health Related Information', 'Birth Information', 'Full Date of Birth (MM/DD/YYYY)',
     'Financial Account Information', 'Access Credentials (Non-Financial Account)',
@@ -79,12 +37,11 @@ def read_old_format(filepath):
     try:
         wb = openpyxl.load_workbook(filepath)
 
-        # Find the sheet (case insensitive, handle both spellings)
+        # Find the sheet - look for any sheet containing 'standardized' or 'standerdized' (case insensitive)
         sheet_name = None
         for name in wb.sheetnames:
             name_lower = name.lower()
-            # Check for both "standardized_data" and "standerdized_data" spellings
-            if 'standardized_data' in name_lower or 'standerdized_data' in name_lower:
+            if 'standardized' in name_lower or 'standerdized' in name_lower:
                 sheet_name = name
                 break
 
@@ -112,6 +69,48 @@ def read_old_format(filepath):
         return None
 
 
+def clean_address(address):
+    """Clean address by removing unwanted words and extra spaces."""
+    if not address:
+        return address
+
+    import re
+
+    cleaned = str(address)
+
+    # Words/patterns to remove from addresses (case insensitive)
+    # Order matters: remove longer phrases first
+    unwanted_patterns = [
+        r'\b(bi\s*-?\s*weekly)\b',      # bi-weekly, bi weekly, biweekly
+        r'\b(bi\s*-?\s*daily)\b',       # bi-daily, bi daily
+        r'\b(bi\s*-?\s*monthly)\b',     # bi-monthly, bi monthly
+        r'\b(semi\s*-?\s*weekly)\b',    # semi-weekly
+        r'\bweekly\b',
+        r'\bdaily\b',
+        r'\btemporary\b',
+        r'\btemp\b',
+        r'\btest\b',
+        r'\bmonthly\b',
+        r'\byearly\b',
+        r'\bannually\b',
+    ]
+
+    # Remove unwanted words (case insensitive)
+    for pattern in unwanted_patterns:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+    # Clean up extra spaces
+    cleaned = ' '.join(cleaned.split())
+
+    # Remove trailing special characters
+    cleaned = cleaned.rstrip('*#@~!-_.,')
+
+    # Clean up again after removing special chars
+    cleaned = cleaned.strip()
+
+    return cleaned if cleaned else address
+
+
 def convert_row(old_headers, old_row):
     """Convert a row from old format to new format."""
     # Create a dict from old headers and row for easier lookup
@@ -124,6 +123,10 @@ def convert_row(old_headers, old_row):
             new_row.append('Employee')
         elif header == 'Student-Related Information':
             new_row.append(None)
+        elif header == 'Residential Address':
+            # Clean the address field
+            address = old_data.get(header)
+            new_row.append(clean_address(address))
         else:
             new_row.append(old_data.get(header))
 
@@ -167,7 +170,7 @@ def save_converted_file(filepath, data):
         # Create new workbook with new template structure
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = 'Standerdized_Data'
+        ws.title = 'Standardized_Data'
 
         # Write headers
         for col_idx, header in enumerate(NEW_HEADERS, 1):
@@ -231,7 +234,7 @@ def main():
             print(f"File not found: {filepath}")
     else:
         # Process all .xlsx files in current directory
-        print("Searching for .xlsx files with 'Standerdized_Data' sheet...\n")
+        print("Searching for .xlsx files with 'Standardized_Data' sheet...\n")
 
         files_found = 0
         for file in Path('.').glob('*.xlsx'):
