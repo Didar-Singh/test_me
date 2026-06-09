@@ -5,6 +5,7 @@ import re
 # Input / Output files
 input_csv = "input.csv"
 output_excel = "output_names.xlsx"
+template_file = "Latest Template.xlsx"
 
 # Suffixes to recognize
 SUFFIXES = ['Jr', 'Sr', 'II', 'III', 'IV', 'V', 'MD', 'Esq', 'PhD', 'DDS', 'DVM', 'Ph.D', 'M.D']
@@ -146,8 +147,8 @@ while i < len(rows):
 
     i += 1
 
-# Excel columns
-columns = [
+# Create dataframe with original columns
+original_columns = [
     "File Number",
     "Page Number",
     "Employee ID",
@@ -157,11 +158,32 @@ columns = [
     "Suffix",
     "Original Text"
 ]
+df_extracted = pd.DataFrame(records, columns=original_columns)
 
-# Create dataframe
-df = pd.DataFrame(records, columns=columns)
+# Read template
+template_df = pd.read_excel(template_file, sheet_name=0)
+template_sheet_name = pd.ExcelFile(template_file).sheet_names[0]
 
-# Save Excel
-df.to_excel(output_excel, index=False)
+# Get template columns
+template_columns = list(template_df.columns)
+
+# Create output dataframe with template structure
+output_data = []
+for _, row in df_extracted.iterrows():
+    new_row = {col: None for col in template_columns}
+    new_row['DOCID'] = row['File Number']
+    new_row['First Name'] = row['First Name']
+    new_row['Middle Name'] = row['Middle Name'] if pd.notna(row['Middle Name']) else None
+    new_row['Last Name'] = row['Last Name']
+    new_row['Suffix'] = row['Suffix'] if pd.notna(row['Suffix']) else None
+    new_row['Employee Identification Number'] = row['Employee ID']
+    output_data.append(new_row)
+
+# Create final dataframe
+df_output = pd.DataFrame(output_data)
+
+# Save with template format
+df_output.to_excel(output_excel, sheet_name=template_sheet_name, index=False)
 
 print(f"Done! {len(records)} names extracted to {output_excel}")
+print(f"Format: {template_sheet_name}")
