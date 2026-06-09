@@ -90,30 +90,43 @@ def convert_row(old_headers, old_row):
 def merge_duplicates(data, headers):
     """
     Merge rows with same Last Name + First Name + Middle Name + Suffix.
-    Keep first occurrence, discard duplicates.
+    Combines data from all matching rows, keeping non-null values from all occurrences.
     """
     seen = {}
     merged = []
 
-    # Convert headers to new format for merging
+    # Get column indices for merging key
+    last_idx = headers.index('Last Name') if 'Last Name' in headers else None
+    first_idx = headers.index('First Name') if 'First Name' in headers else None
+    middle_idx = headers.index('Middle Name') if 'Middle Name' in headers else None
+    suffix_idx = headers.index('Suffix') if 'Suffix' in headers else None
+
+    if last_idx is None or first_idx is None:
+        return data
+
+    # Group rows by name
     for row in data:
-        last_idx = headers.index('Last Name') if 'Last Name' in headers else None
-        first_idx = headers.index('First Name') if 'First Name' in headers else None
-        middle_idx = headers.index('Middle Name') if 'Middle Name' in headers else None
-        suffix_idx = headers.index('Suffix') if 'Suffix' in headers else None
+        last = row[last_idx] if last_idx < len(row) else None
+        first = row[first_idx] if first_idx < len(row) else None
+        middle = row[middle_idx] if middle_idx < len(row) else None
+        suffix = row[suffix_idx] if suffix_idx < len(row) else None
 
-        if last_idx is not None and first_idx is not None:
-            # Create a key from name parts
-            last = row[last_idx] if last_idx < len(row) else None
-            first = row[first_idx] if first_idx < len(row) else None
-            middle = row[middle_idx] if middle_idx < len(row) else None
-            suffix = row[suffix_idx] if suffix_idx < len(row) else None
+        key = (str(last), str(first), str(middle), str(suffix))
 
-            key = (str(last), str(first), str(middle), str(suffix))
+        if key not in seen:
+            # First occurrence - store the row
+            seen[key] = list(row)  # Make a copy
+        else:
+            # Duplicate found - merge data
+            # For each column, use non-null value from either row
+            for col_idx in range(len(row)):
+                # If current row has data in this column and existing row doesn't, use current row's data
+                if row[col_idx] is not None and seen[key][col_idx] is None:
+                    seen[key][col_idx] = row[col_idx]
 
-            if key not in seen:
-                seen[key] = True
-                merged.append(row)
+    # Convert back to list
+    for row in seen.values():
+        merged.append(row)
 
     return merged
 
