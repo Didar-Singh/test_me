@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(pip install pywin32 -q)",
-      "PowerShell(winget install UB-Mannheim.TesseractOCR --accept-package-agreements --accept-source-agreements 2>&1)"
-    ]
-  }
-}
