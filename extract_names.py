@@ -82,6 +82,7 @@ with open(input_csv, 'r', encoding='utf-8', errors='ignore') as file:
 
 # Loop through rows
 i = 0
+
 while i < len(rows):
     row = rows[i]
 
@@ -96,9 +97,6 @@ while i < len(rows):
 
     # Look for comma (indicates Last Name)
     if ',' in text:
-        # Extract Employee ID from File: pattern
-        employee_id = extract_employee_id(text)
-
         # Get next line for potential first name
         next_text = ""
         if i + 1 < len(rows) and len(rows[i + 1]) >= 3:
@@ -107,17 +105,27 @@ while i < len(rows):
         # Parse the name
         parsed = parse_name(text, next_text)
 
-        # Add to records
-        records.append([
-            file_number,
-            page_num,
-            employee_id,
-            parsed['first_name'],
-            parsed['middle_name'],
-            parsed['last_name'],
-            parsed['suffix'],
-            text  # Keep original text for reference
-        ])
+        # Look forward for Employee ID (File: should appear after name)
+        employee_id = ""
+        for j in range(i + 1, min(i + 5, len(rows))):  # Check next 4 rows
+            if len(rows[j]) >= 3:
+                future_text = rows[j][2].strip()
+                if 'File:' in future_text:
+                    employee_id = extract_employee_id(future_text)
+                    break
+
+        # Only add if we got a last name
+        if parsed['last_name']:
+            records.append([
+                file_number,
+                page_num,
+                employee_id,
+                parsed['first_name'],
+                parsed['middle_name'],
+                parsed['last_name'],
+                parsed['suffix'],
+                text  # Keep original text for reference
+            ])
 
     i += 1
 
