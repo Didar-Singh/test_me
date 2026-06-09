@@ -9,11 +9,18 @@ output_excel = "output_names.xlsx"
 # Suffixes to recognize
 SUFFIXES = ['Jr', 'Sr', 'II', 'III', 'IV', 'V', 'MD', 'Esq', 'PhD', 'DDS', 'DVM', 'Ph.D', 'M.D']
 
+def extract_employee_id(text):
+    """Extract Employee ID from 'File:' pattern"""
+    match = re.search(r'File:\s*(\d+)', text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return ""
+
 def parse_name(last_name_line, first_name_line=""):
     """
     Parse first name, middle name, last name, and suffix
 
-    last_name_line: Text with comma, e.g., "HARISH, 5 000 00 YEB..."
+    last_name_line: Text with comma, e.g., "HARISH," or "HARISH, 5 000 00 YEB..."
     first_name_line: Next line text, e.g., "PURI 5 000 00 968..."
     """
 
@@ -35,7 +42,7 @@ def parse_name(last_name_line, first_name_line=""):
     words = []
     for word in first_name_text.split():
         # Stop if we hit numbers or special patterns
-        if re.match(r'^\d+', word) or word.lower() in ['yeb', 'n-', 'x', 'mcttax', 'fit', 'ny', 'w', 'chk', 'voucher']:
+        if re.match(r'^\d+', word) or word.lower() in ['yeb', 'n-', 'x', 'mcttax', 'fit', 'ny', 'w', 'chk', 'voucher', 'file']:
             break
         words.append(word)
 
@@ -89,6 +96,9 @@ while i < len(rows):
 
     # Look for comma (indicates Last Name)
     if ',' in text:
+        # Extract Employee ID from File: pattern
+        employee_id = extract_employee_id(text)
+
         # Get next line for potential first name
         next_text = ""
         if i + 1 < len(rows) and len(rows[i + 1]) >= 3:
@@ -101,6 +111,7 @@ while i < len(rows):
         records.append([
             file_number,
             page_num,
+            employee_id,
             parsed['first_name'],
             parsed['middle_name'],
             parsed['last_name'],
@@ -114,6 +125,7 @@ while i < len(rows):
 columns = [
     "File Number",
     "Page Number",
+    "Employee ID",
     "First Name",
     "Middle Name",
     "Last Name",
