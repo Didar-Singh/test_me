@@ -16,6 +16,17 @@ def extract_employee_id(text):
         return match.group(1)
     return ""
 
+def is_valid_name(name):
+    """Check if name looks like a person's name (alphabetic, reasonable length)"""
+    if not name:
+        return False
+    # Must be alphabetic only, 2-30 chars
+    if not re.match(r'^[A-Za-z\s\-\.]+$', name):
+        return False
+    if len(name) < 2 or len(name) > 30:
+        return False
+    return True
+
 def parse_name(last_name_line, first_name_line=""):
     """
     Parse first name, middle name, last name, and suffix
@@ -118,8 +129,10 @@ while i < len(rows):
                     employee_id = extract_employee_id(future_text)
                     break
 
-        # Only add if we got a last name
-        if parsed['last_name']:
+        # Only add if we got BOTH Employee ID AND Last Name AND First Name
+        # AND both names look like actual person names
+        if (parsed['last_name'] and employee_id and parsed['first_name'] and
+            is_valid_name(parsed['last_name']) and is_valid_name(parsed['first_name'])):
             records.append([
                 file_number,
                 page_num,
