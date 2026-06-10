@@ -1,182 +1,121 @@
 """
-extract_names.py
-----------------
-Extracts names from a searchable PDF (or falls back to Tesseract OCR).
-Expected PDF format:  LASTNAME, FIRSTNAME [MI].
-Handles:
-  - Single last names:        LOAYZA, JOSE A.
-  - Double-barrelled names:   DE LA CRUZ, JUAN B.
-  - No middle initial:        SMITH, JOHN
-
-Output:  names_output.txt  (comma-separated: LAST,FIRST,MI)
-         names_output.csv  (same, with header row — paste into Excel)
+debug_pdf.py
+------------
+Debug tool to inspect what's actually inside a PDF.
+Shows: raw text, form fields, and positional word data.
 
 Usage:
-  python extract_names.py yourfile.pdf
+    python debug_pdf.py yourfile.pdf
 """
 
 import sys
-import os
-import re
 import subprocess
-import csv
+from pypdf import PdfReader
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+def separator(title):
+    print(f"\n{'='*60}")
+    print(f"  {title}")
+    print('='*60)
 
-def extract_text_pdftotext(pdf_path: str) -> str:
-    """Use pdftotext (poppler) — works on searchable PDFs."""
+def check_pdftotext(pdf_path):
+    separator("1. RAW TEXT (pdftotext)")
     try:
         result = subprocess.run(
             ["pdftotext", "-layout", pdf_path, "-"],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True
         )
-        return result.stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+        text = result.stdout.strip()
+        if text:
+            print(text[:2000])  # first 2000 chars
+        else:
+            print("❌ No text extracted — PDF may be scanned/image-based")
+    except FileNotFoundError:
+        print("❌ pdftotext not found — install poppler")
 
-
-def extract_text_tesseract(pdf_path: str) -> str:
-    """
-    Fall back to Tesseract OCR.
-    Converts each page to an image via pdftoppm, then OCRs with pytesseract.
-    Requires: pdftoppm (poppler), tesseract, pytesseract, Pillow
-    """
+def check_form_fields(pdf_path):
+    separator("2. FORM FIELDS (pypdf)")
     try:
-        import pytesseract
-        from PIL import Image
-        import tempfile, glob
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(
-                ["pdftoppm", "-jpeg", "-r", "300", pdf_path,
-                 os.path.join(tmpdir, "page")],
-                check=True
-            )
-            pages = sorted(glob.glob(os.path.join(tmpdir, "page-*.jpg")) or
-                           glob.glob(os.path.join(tmpdir, "page-*.jpeg")))
-            if not pages:
-                # pdftoppm sometimes uses different zero-padding
-                pages = sorted(glob.glob(os.path.join(tmpdir, "page*")))
-
-            all_text = []
-            for page_img in pages:
-                img = Image.open(page_img)
-                text = pytesseract.image_to_string(
-                    img,
-                    config="--psm 6 -c tessedit_char_whitelist="
-                           "ABCDEFGHIJKLMNOPQRSTUVWXYZ., "
-                )
-                all_text.append(text)
-            return "\n".join(all_text)
-
+        reader = PdfReader(pdf_path)
+        fields = reader.get_fields()
+        if fields:
+            print(f"✅ Found {len(fields)} form fields:\n")
+            for field_name, field_obj in fields.items():
+                value = field_obj.get("/V", "(empty)")
+                ftype = field_obj.get("/FT", "unknown")
+                print(f"  Field : {field_name}")
+                print(f"  Type  : {ftype}")
+                print(f"  Value : {value}")
+                print()
+        else:
+            print("❌ No form fields found — not a fillable PDF form")
     except Exception as e:
-        print(f"[ERROR] Tesseract fallback failed: {e}")
-        return ""
+        print(f"❌ Error reading form fields: {e}")
 
+def check_pypdf_text(pdf_path):
+    separator("3. PAGE TEXT (pypdf per page)")
+    try:
+        reader = PdfReader(pdf_path)
+        print(f"Total pages: {len(reader.pages)}\n")
+        # Show first 3 pages only
+        for i, page in enumerate(reader.pages[:3]):
+            print(f"--- Page {i+1} ---")
+            text = page.extract_text()
+            if text:
+                print(text[:500])
+            else:
+                print("(no text on this page)")
+            print()
+    except Exception as e:
+        print(f"❌ Error: {e}")
 
-def parse_names(raw_text: str) -> list[dict]:
-    """
-    Parse lines matching the pattern:
-        LASTNAME, FIRSTNAME [MI[.]]
-    or multi-word last names like:
-        DE LA CRUZ, JUAN B.
+def check_pdfplumber(pdf_path):
+    separator("4. POSITIONAL WORDS (pdfplumber)")
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            page = pdf.pages[0]  # first page only
+            words = page.extract_words()
+            if words:
+                print(f"✅ Found {len(words)} words on page 1:\n")
+                print(f"  {'TEXT':<20} {'X0':>6} {'Y0':>6} {'X1':>6} {'Y1':>6}")
+                print(f"  {'-'*50}")
+                for w in words[:40]:  # first 40 words
+                    print(f"  {w['text']:<20} {w['x0']:>6.1f} {w['top']:>6.1f} "
+                          f"{w['x1']:>6.1f} {w['bottom']:>6.1f}")
+            else:
+                print("❌ No words found via pdfplumber")
+    except ImportError:
+        print("❌ pdfplumber not installed — run: pip install pdfplumber")
+    except Exception as e:
+        print(f"❌ Error: {e}")
 
-    Returns list of dicts: {last, first, mi, raw}
-    """
-    # Pattern breakdown:
-    #   ^([A-Z][A-Z ,]*?)   → last name (1+ uppercase words, may contain spaces)
-    #   ,\s*                → the comma separator
-    #   ([A-Z]+)            → first name
-    #   (?:\s+([A-Z])\.?)?  → optional middle initial (with or without trailing dot)
-    pattern = re.compile(
-        r"^([A-Z][A-Z ]+?),\s*([A-Z]+)(?:\s+([A-Z])\.?)?\s*$"
-    )
-
-    results = []
-    for line in raw_text.splitlines():
-        line = line.strip()
-        # Skip blank lines or lines that are clearly not names
-        if not line or len(line) < 3:
-            continue
-        # Normalise multiple spaces → single space (OCR artifact cleanup)
-        line_clean = re.sub(r"\s{2,}", " ", line).strip(".")
-
-        m = pattern.match(line_clean)
-        if m:
-            last  = m.group(1).strip()
-            first = m.group(2).strip()
-            mi    = (m.group(3) or "").strip()
-            results.append({"last": last, "first": first, "mi": mi, "raw": line})
-
-    return results
-
+def check_fonts(pdf_path):
+    separator("5. FONT INFO (pdffonts)")
+    try:
+        result = subprocess.run(
+            ["pdffonts", pdf_path],
+            capture_output=True, text=True
+        )
+        print(result.stdout or "No font info returned")
+    except FileNotFoundError:
+        print("❌ pdffonts not found — install poppler")
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
-def main():
+if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python extract_names.py <yourfile.pdf>")
+        print("Usage: python debug_pdf.py <yourfile.pdf>")
         sys.exit(1)
 
     pdf_path = sys.argv[1]
-    if not os.path.isfile(pdf_path):
-        print(f"[ERROR] File not found: {pdf_path}")
-        sys.exit(1)
+    print(f"\n🔍 Debugging: {pdf_path}\n")
 
-    print(f"[1/3] Trying pdftotext on: {pdf_path}")
-    raw = extract_text_pdftotext(pdf_path)
+    check_pdftotext(pdf_path)
+    check_form_fields(pdf_path)
+    check_pypdf_text(pdf_path)
+    check_pdfplumber(pdf_path)
+    check_fonts(pdf_path)
 
-    # Quick sanity check — if we got very little text, fall back to OCR
-    if len(raw.strip()) < 20:
-        print("[2/3] pdftotext returned little/no text → falling back to Tesseract OCR ...")
-        raw = extract_text_tesseract(pdf_path)
-    else:
-        print("[2/3] pdftotext succeeded, skipping OCR.")
-
-    if not raw.strip():
-        print("[ERROR] Could not extract any text. Check poppler/tesseract installation.")
-        sys.exit(1)
-
-    print("[3/3] Parsing names ...")
-    names = parse_names(raw)
-
-    if not names:
-        print("\n[WARNING] No names matched the expected pattern.")
-        print("Raw extracted text preview:\n")
-        print(raw[:500])
-        sys.exit(1)
-
-    # ── output ──
-    base = os.path.splitext(pdf_path)[0]
-    txt_out = base + "_names.txt"
-    csv_out = base + "_names.csv"
-
-    # Plain text: one name per line, comma-separated fields
-    with open(txt_out, "w", encoding="utf-8") as f:
-        for n in names:
-            line = f"{n['last']},{n['first']},{n['mi']}" if n['mi'] \
-                   else f"{n['last']},{n['first']}"
-            f.write(line + "\n")
-
-    # CSV with header — open directly in Excel
-    with open(csv_out, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["last", "first", "mi"])
-        writer.writeheader()
-        for n in names:
-            writer.writerow({"last": n["last"], "first": n["first"], "mi": n["mi"]})
-
-    print(f"\n✅ Done! {len(names)} names extracted.")
-    print(f"   Text file : {txt_out}")
-    print(f"   CSV file  : {csv_out}  ← open this in Excel\n")
-
-    # Preview
-    print(f"{'LAST':<25} {'FIRST':<20} {'MI'}")
-    print("-" * 50)
-    for n in names[:20]:
-        print(f"{n['last']:<25} {n['first']:<20} {n['mi']}")
-    if len(names) > 20:
-        print(f"  ... and {len(names)-20} more rows.")
-
-
-if __name__ == "__main__":
-    main()
+    print(f"\n{'='*60}")
+    print("  DEBUG COMPLETE")
+    print(f"{'='*60}\n")
